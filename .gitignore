@@ -1,0 +1,63 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment & Secrets
+.env
+.env.local
+*.key
+*.pem
+
+# Configuration (contains API keys - never commit!)
+config.toml
+.scurl/
+
+# Testing
+/test/
+/tests/output/
+*.test.sh
+test-*.sh
+/scratchpad/
+
+# Logs & Debug
+*.log
+debug/
+*.prof
+
+# Build artifacts
+*.dSYM/
+*.so
+*.dylib
+*.dll
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+.cache/
+
+# Claude Code
+.claude/settings.local.json
+
+# macOS
+.AppleDouble
+.LSOverride
+._*
+
+# Local documentation builds
+/site/
+/book/
+
+# Backup files
+*.bak
+*.backup
