@@ -82,12 +82,49 @@ struct Cli {
     yolo: bool,
 
     /// Override API key from config
-    #[arg(short = 'k', long, global = true)]
+    #[arg(long, global = true)]
     api_key: Option<String>,
 
     /// Override provider from config
     #[arg(short = 'p', long, global = true)]
     provider: Option<String>,
+
+    // Network & Proxy Options
+    /// HTTP/HTTPS proxy URL (e.g., http://proxy.example.com:8080)
+    #[arg(short = 'x', long, global = true, env = "HTTPS_PROXY")]
+    proxy: Option<String>,
+
+    /// Timeout in seconds for network requests
+    #[arg(short = 't', long, default_value = "30", global = true)]
+    timeout: u64,
+
+    /// Maximum number of redirects to follow
+    #[arg(long, default_value = "10", global = true)]
+    max_redirects: usize,
+
+    /// Disable SSL certificate verification (insecure!)
+    #[arg(short = 'k', long = "insecure", global = true)]
+    insecure: bool,
+
+    /// Custom User-Agent header
+    #[arg(short = 'A', long, global = true)]
+    user_agent: Option<String>,
+
+    /// Additional headers (format: 'Key: Value')
+    #[arg(short = 'H', long = "header", global = true)]
+    headers: Vec<String>,
+
+    /// Number of retries on network failure
+    #[arg(long, default_value = "3", global = true)]
+    retries: usize,
+
+    /// Use system proxy settings
+    #[arg(long, global = true)]
+    system_proxy: bool,
+
+    /// Disable proxy even if environment variables are set
+    #[arg(long, global = true)]
+    no_proxy: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -101,6 +138,88 @@ enum Commands {
     },
     /// Show current configuration
     Config,
+}
+
+// ============================================================================
+// Network Configuration
+// ============================================================================
+
+#[derive(Debug, Clone)]
+struct NetworkConfig {
+    proxy: Option<String>,
+    timeout: u64,
+    max_redirects: usize,
+    insecure: bool,
+    user_agent: Option<String>,
+    headers: Vec<String>,
+    retries: usize,
+    system_proxy: bool,
+    no_proxy: bool,
+}
+
+impl NetworkConfig {
+    fn from_cli(cli: &Cli) -> Self {
+        Self {
+            proxy: cli.proxy.clone(),
+            timeout: cli.timeout,
+            max_redirects: cli.max_redirects,
+            insecure: cli.insecure,
+            user_agent: cli.user_agent.clone(),
+            headers: cli.headers.clone(),
+            retries: cli.retries,
+            system_proxy: cli.system_proxy,
+            no_proxy: cli.no_proxy,
+        }
+    }
+
+    fn build_client(&self) -> Result<reqwest::Client> {
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(self.timeout))
+            .redirect(if self.max_redirects > 0 {
+                reqwest::redirect::Policy::limited(self.max_redirects)
+            } else {
+                reqwest::redirect::Policy::none()
+            });
+
+        // SSL/TLS configuration
+        if self.insecure {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+
+        // Proxy configuration
+        if self.no_proxy {
+            builder = builder.no_proxy();
+        } else if let Some(ref proxy_url) = self.proxy {
+            let proxy = reqwest::Proxy::all(proxy_url)
+                .context("Invalid proxy URL")?;
+            builder = builder.proxy(proxy);
+        } else if self.system_proxy {
+            // System proxy is enabled by default in reqwest
+            // We don't need to do anything special
+        }
+
+        // User-Agent
+        if let Some(ref ua) = self.user_agent {
+            builder = builder.user_agent(ua);
+        } else {
+            builder = builder.user_agent(format!("scurl/{}", env!("CARGO_PKG_VERSION")));
+        }
+
+        // Build the client
+        builder.build().context("Failed to build HTTP client")
+    }
+
+    fn parse_headers(&self) -> Result<Vec<(String, String)>> {
+        let mut parsed = Vec::new();
+        for header in &self.headers {
+            if let Some((key, value)) = header.split_once(':') {
+                parsed.push((key.trim().to_string(), value.trim().to_string()));
+            } else {
+                anyhow::bail!("Invalid header format: '{}'. Use 'Key: Value'", header);
+            }
+        }
+        Ok(parsed)
+    }
 }
 
 // ============================================================================
@@ -140,7 +259,7 @@ impl Provider {
         }
     }
 
-    async fn analyze(&self, script: &str, api_key: &str, model: Option<&str>) -> Result<String> {
+    async fn analyze(&self, script: &str, api_key: &str, model: Option<&str>, net_config: &NetworkConfig) -> Result<String> {
         let model = model.unwrap_or_else(|| self.default_model());
 
         let prompt = format!(
@@ -174,23 +293,25 @@ Be practical: common patterns like sudo for installation, downloading from offic
         );
 
         match self {
-            Provider::Anthropic => self.call_anthropic(&prompt, api_key, model).await,
+            Provider::Anthropic => self.call_anthropic(&prompt, api_key, model, net_config).await,
             Provider::XAI => self.call_openai_compatible(
                 &prompt,
                 api_key,
                 model,
                 "https://api.x.ai/v1/chat/completions",
+                net_config,
             ).await,
             Provider::OpenAI => self.call_openai_compatible(
                 &prompt,
                 api_key,
                 model,
                 "https://api.openai.com/v1/chat/completions",
+                net_config,
             ).await,
         }
     }
 
-    async fn call_anthropic(&self, prompt: &str, api_key: &str, model: &str) -> Result<String> {
+    async fn call_anthropic(&self, prompt: &str, api_key: &str, model: &str, net_config: &NetworkConfig) -> Result<String> {
         #[derive(Serialize)]
         struct Message {
             role: String,
@@ -214,7 +335,7 @@ Be practical: common patterns like sudo for installation, downloading from offic
             content: Vec<ContentBlock>,
         }
 
-        let client = reqwest::Client::new();
+        let client = net_config.build_client()?;
         let request = Request {
             model: model.to_string(),
             max_tokens: 2048,
@@ -259,6 +380,7 @@ Be practical: common patterns like sudo for installation, downloading from offic
         api_key: &str,
         model: &str,
         endpoint: &str,
+        net_config: &NetworkConfig,
     ) -> Result<String> {
         #[derive(Serialize)]
         struct Message {
@@ -288,7 +410,7 @@ Be practical: common patterns like sudo for installation, downloading from offic
             choices: Vec<Choice>,
         }
 
-        let client = reqwest::Client::new();
+        let client = net_config.build_client()?;
         let request = Request {
             model: model.to_string(),
             messages: vec![Message {
@@ -453,7 +575,7 @@ fn display_analysis(analysis: &SecurityAnalysis) {
 // Core Functions
 // ============================================================================
 
-async fn download_script(url: &str) -> Result<String> {
+async fn download_script(url: &str, net_config: &NetworkConfig) -> Result<String> {
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
         ProgressStyle::default_spinner()
@@ -464,36 +586,60 @@ async fn download_script(url: &str) -> Result<String> {
     spinner.set_message("Downloading script...");
     spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+    let client = net_config.build_client()?;
+    let headers = net_config.parse_headers()?;
 
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .context("Failed to download script")?;
+    let mut last_error = None;
+    let max_attempts = net_config.retries.max(1);
 
-    if !response.status().is_success() {
-        spinner.finish_and_clear();
-        anyhow::bail!("HTTP error: {}", response.status());
+    for attempt in 1..=max_attempts {
+        if attempt > 1 {
+            spinner.set_message(format!("Downloading script... (retry {}/{})", attempt - 1, max_attempts - 1));
+            tokio::time::sleep(std::time::Duration::from_millis(1000 * attempt as u64)).await;
+        }
+
+        let mut request = client.get(url);
+
+        // Add custom headers
+        for (key, value) in &headers {
+            request = request.header(key, value);
+        }
+
+        match request.send().await {
+            Ok(response) => {
+                if !response.status().is_success() {
+                    last_error = Some(anyhow::anyhow!("HTTP error: {}", response.status()));
+                    continue;
+                }
+
+                match response.text().await {
+                    Ok(script) => {
+                        if script.is_empty() {
+                            spinner.finish_and_clear();
+                            anyhow::bail!("Downloaded script is empty");
+                        }
+
+                        spinner.finish_with_message(format!("{} Downloaded {} bytes", "✓".green(), script.len()));
+                        return Ok(script);
+                    }
+                    Err(e) => {
+                        last_error = Some(anyhow::Error::from(e));
+                        continue;
+                    }
+                }
+            }
+            Err(e) => {
+                last_error = Some(anyhow::Error::from(e));
+                continue;
+            }
+        }
     }
 
-    let script = response
-        .text()
-        .await
-        .context("Failed to read response body")?;
-
-    if script.is_empty() {
-        spinner.finish_and_clear();
-        anyhow::bail!("Downloaded script is empty");
-    }
-
-    spinner.finish_with_message(format!("{} Downloaded {} bytes", "✓".green(), script.len()));
-    Ok(script)
+    spinner.finish_and_clear();
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Failed to download script after {} attempts", max_attempts)))
 }
 
-async fn analyze_script(script: &str, config: &Config) -> Result<SecurityAnalysis> {
+async fn analyze_script(script: &str, config: &Config, net_config: &NetworkConfig) -> Result<SecurityAnalysis> {
     let provider = Provider::from_str(&config.provider)?;
 
     // Create animated spinner
@@ -509,7 +655,7 @@ async fn analyze_script(script: &str, config: &Config) -> Result<SecurityAnalysi
 
     // Perform analysis
     let response_text = provider
-        .analyze(script, &config.api_key, config.model.as_deref())
+        .analyze(script, &config.api_key, config.model.as_deref(), net_config)
         .await?;
 
     spinner.finish_with_message(format!("{} Analysis complete!", "✓".green()));
@@ -654,9 +800,22 @@ async fn login_command() -> Result<()> {
     spinner.set_message("Testing API connection...");
     spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
+    // Use default network config for login test
+    let net_config = NetworkConfig {
+        proxy: None,
+        timeout: 30,
+        max_redirects: 10,
+        insecure: false,
+        user_agent: None,
+        headers: Vec::new(),
+        retries: 3,
+        system_proxy: false,
+        no_proxy: false,
+    };
+
     let test_script = "#!/bin/bash\necho 'Hello, World!'";
     match provider
-        .analyze(test_script, &api_key, model.as_deref())
+        .analyze(test_script, &api_key, model.as_deref(), &net_config)
         .await
     {
         Ok(_) => {
@@ -752,8 +911,11 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
         config.provider = provider.clone();
     }
 
+    // Build network configuration from CLI
+    let net_config = NetworkConfig::from_cli(cli);
+
     // Download the script
-    let script = download_script(url).await?;
+    let script = download_script(url, &net_config).await?;
 
     // YOLO mode - skip review
     if cli.yolo {
@@ -768,7 +930,7 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
     }
 
     // Perform security analysis
-    let analysis = analyze_script(&script, &config).await?;
+    let analysis = analyze_script(&script, &config, &net_config).await?;
 
     // Display results
     display_analysis(&analysis);
