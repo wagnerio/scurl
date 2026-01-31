@@ -48,7 +48,14 @@ impl Config {
 
         let path = Self::config_path()?;
         let content = toml::to_string_pretty(self)?;
-        fs::write(path, content)?;
+        fs::write(&path, content)?;
+
+        // Restrict file permissions to owner-only (contains API keys)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        }
 
         Ok(())
     }
@@ -227,6 +234,7 @@ impl NetworkConfig {
 // ============================================================================
 
 #[derive(Debug)]
+#[allow(clippy::upper_case_acronyms)]
 enum Provider {
     Anthropic,
     XAI,
@@ -498,18 +506,23 @@ impl RiskLevel {
 }
 
 fn parse_analysis(text: &str) -> Result<SecurityAnalysis> {
-    let mut risk_level = RiskLevel::Medium;
+    let mut risk_level = None;
     let mut findings = Vec::new();
     let mut recommendation = String::new();
 
     let mut current_section = "";
 
-    for line in text.lines() {
+    // Strip common markdown formatting the LLM might add
+    let clean = text
+        .replace("**", "")
+        .replace("__", "");
+
+    for line in clean.lines() {
         let line = line.trim();
 
         if line.starts_with("RISK_LEVEL:") {
             let level = line.replace("RISK_LEVEL:", "").trim().to_string();
-            risk_level = RiskLevel::from_str(&level);
+            risk_level = Some(RiskLevel::from_str(&level));
         } else if line == "FINDINGS:" {
             current_section = "findings";
         } else if line.starts_with("RECOMMENDATION:") {
@@ -524,6 +537,27 @@ fn parse_analysis(text: &str) -> Result<SecurityAnalysis> {
             recommendation.push_str(line);
         }
     }
+
+    // If we couldn't parse the risk level, treat as HIGH out of caution
+    // and include the raw response so the user can judge for themselves
+    let risk_level = match risk_level {
+        Some(level) => level,
+        None => {
+            eprintln!(
+                "{} Could not parse AI risk level — defaulting to HIGH for safety.",
+                "⚠".yellow()
+            );
+            if findings.is_empty() {
+                findings.push("AI response could not be parsed into structured format.".to_string());
+            }
+            if recommendation.is_empty() {
+                recommendation = "Review the raw analysis below and use your own judgement.".to_string();
+                // Include raw response as a finding so the user can still see it
+                findings.push(format!("Raw AI response:\n{}", text));
+            }
+            RiskLevel::High
+        }
+    };
 
     Ok(SecurityAnalysis {
         risk_level,
@@ -576,15 +610,7 @@ fn display_analysis(analysis: &SecurityAnalysis) {
 // ============================================================================
 
 async fn download_script(url: &str, net_config: &NetworkConfig) -> Result<String> {
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::default_spinner()
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-            .template("{spinner:.cyan} {msg}")
-            .unwrap()
-    );
-    spinner.set_message("Downloading script...");
-    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+    let spinner = new_spinner("Downloading script...");
 
     let client = net_config.build_client()?;
     let headers = net_config.parse_headers()?;
@@ -607,9 +633,30 @@ async fn download_script(url: &str, net_config: &NetworkConfig) -> Result<String
 
         match request.send().await {
             Ok(response) => {
-                if !response.status().is_success() {
-                    last_error = Some(anyhow::anyhow!("HTTP error: {}", response.status()));
+                let status = response.status();
+
+                if !status.is_success() {
+                    let err = anyhow::anyhow!("HTTP error: {}", status);
+                    // Don't retry client errors (4xx) — they won't succeed on retry
+                    if status.is_client_error() {
+                        spinner.finish_and_clear();
+                        return Err(err);
+                    }
+                    last_error = Some(err);
                     continue;
+                }
+
+                // Guard against excessively large responses (10 MB limit)
+                const MAX_SCRIPT_SIZE: u64 = 10 * 1024 * 1024;
+                if let Some(len) = response.content_length() {
+                    if len > MAX_SCRIPT_SIZE {
+                        spinner.finish_and_clear();
+                        anyhow::bail!(
+                            "Script too large ({:.1} MB). Max allowed: {:.0} MB",
+                            len as f64 / 1_048_576.0,
+                            MAX_SCRIPT_SIZE as f64 / 1_048_576.0
+                        );
+                    }
                 }
 
                 match response.text().await {
@@ -617,6 +664,11 @@ async fn download_script(url: &str, net_config: &NetworkConfig) -> Result<String
                         if script.is_empty() {
                             spinner.finish_and_clear();
                             anyhow::bail!("Downloaded script is empty");
+                        }
+
+                        if script.len() as u64 > MAX_SCRIPT_SIZE {
+                            spinner.finish_and_clear();
+                            anyhow::bail!("Script too large ({:.1} MB)", script.len() as f64 / 1_048_576.0);
                         }
 
                         spinner.finish_with_message(format!("{} Downloaded {} bytes", "✓".green(), script.len()));
@@ -641,17 +693,7 @@ async fn download_script(url: &str, net_config: &NetworkConfig) -> Result<String
 
 async fn analyze_script(script: &str, config: &Config, net_config: &NetworkConfig) -> Result<SecurityAnalysis> {
     let provider = Provider::from_str(&config.provider)?;
-
-    // Create animated spinner
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::default_spinner()
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-            .template("{spinner:.cyan} {msg}")
-            .unwrap()
-    );
-    spinner.set_message(format!("Analyzing script with {} AI...", provider.name()));
-    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+    let spinner = new_spinner(&format!("Analyzing script with {} AI...", provider.name()));
 
     // Perform analysis
     let response_text = provider
@@ -727,7 +769,20 @@ fn prompt(message: &str) -> Result<String> {
     Ok(input.trim().to_string())
 }
 
-async fn login_command() -> Result<()> {
+fn new_spinner(msg: &str) -> ProgressBar {
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+            .template("{spinner:.cyan} {msg}")
+            .unwrap(),
+    );
+    spinner.set_message(msg.to_string());
+    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+    spinner
+}
+
+async fn login_command(cli: &Cli) -> Result<()> {
     println!(
         "\n{} {}\n",
         "🔒 scurl".bright_cyan().bold(),
@@ -789,29 +844,9 @@ async fn login_command() -> Result<()> {
         Some(custom_model)
     };
 
-    // Test the configuration
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::default_spinner()
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-            .template("{spinner:.cyan} {msg}")
-            .unwrap()
-    );
-    spinner.set_message("Testing API connection...");
-    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
-
-    // Use default network config for login test
-    let net_config = NetworkConfig {
-        proxy: None,
-        timeout: 30,
-        max_redirects: 10,
-        insecure: false,
-        user_agent: None,
-        headers: Vec::new(),
-        retries: 3,
-        system_proxy: false,
-        no_proxy: false,
-    };
+    // Test the configuration (respects --proxy and other network flags)
+    let spinner = new_spinner("Testing API connection...");
+    let net_config = NetworkConfig::from_cli(cli);
 
     let test_script = "#!/bin/bash\necho 'Hello, World!'";
     match provider
@@ -857,14 +892,15 @@ async fn config_command() -> Result<()> {
     let provider = Provider::from_str(&config.provider)?;
     println!("{:15} {}", "Provider:".bright_white(), provider.name());
 
-    let masked_key = if config.api_key.len() > 10 {
-        format!(
-            "{}...{}",
-            &config.api_key[..6],
-            &config.api_key[config.api_key.len() - 4..]
-        )
-    } else {
-        "***".to_string()
+    let masked_key = {
+        let chars: Vec<char> = config.api_key.chars().collect();
+        if chars.len() > 10 {
+            let prefix: String = chars[..6].iter().collect();
+            let suffix: String = chars[chars.len() - 4..].iter().collect();
+            format!("{}...{}", prefix, suffix)
+        } else {
+            "***".to_string()
+        }
     };
     println!("{:15} {}", "API Key:".bright_white(), masked_key);
 
@@ -913,6 +949,14 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
 
     // Build network configuration from CLI
     let net_config = NetworkConfig::from_cli(cli);
+
+    if cli.insecure {
+        eprintln!(
+            "{}",
+            "⚠️  SSL verification disabled — connection is not secure!"
+                .bright_yellow()
+        );
+    }
 
     // Download the script
     let script = download_script(url, &net_config).await?;
@@ -970,7 +1014,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Login) => login_command().await,
+        Some(Commands::Login) => login_command(&cli).await,
         Some(Commands::Config) => config_command().await,
         Some(Commands::Analyze { ref url }) => analyze_command(url, &cli).await,
         None => {
