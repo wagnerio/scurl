@@ -67,6 +67,7 @@ impl Config {
 
 #[derive(Parser, Debug)]
 #[command(name = "scurl")]
+#[command(version)]
 #[command(about = "Secure curl - AI-powered security review for install scripts", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -197,8 +198,7 @@ impl NetworkConfig {
         if self.no_proxy {
             builder = builder.no_proxy();
         } else if let Some(ref proxy_url) = self.proxy {
-            let proxy = reqwest::Proxy::all(proxy_url)
-                .context("Invalid proxy URL")?;
+            let proxy = reqwest::Proxy::all(proxy_url).context("Invalid proxy URL")?;
             builder = builder.proxy(proxy);
         } else if self.system_proxy {
             // System proxy is enabled by default in reqwest
@@ -267,7 +267,13 @@ impl Provider {
         }
     }
 
-    async fn analyze(&self, script: &str, api_key: &str, model: Option<&str>, net_config: &NetworkConfig) -> Result<String> {
+    async fn analyze(
+        &self,
+        script: &str,
+        api_key: &str,
+        model: Option<&str>,
+        net_config: &NetworkConfig,
+    ) -> Result<String> {
         let model = model.unwrap_or_else(|| self.default_model());
 
         let prompt = format!(
@@ -301,25 +307,40 @@ Be practical: common patterns like sudo for installation, downloading from offic
         );
 
         match self {
-            Provider::Anthropic => self.call_anthropic(&prompt, api_key, model, net_config).await,
-            Provider::XAI => self.call_openai_compatible(
-                &prompt,
-                api_key,
-                model,
-                "https://api.x.ai/v1/chat/completions",
-                net_config,
-            ).await,
-            Provider::OpenAI => self.call_openai_compatible(
-                &prompt,
-                api_key,
-                model,
-                "https://api.openai.com/v1/chat/completions",
-                net_config,
-            ).await,
+            Provider::Anthropic => {
+                self.call_anthropic(&prompt, api_key, model, net_config)
+                    .await
+            }
+            Provider::XAI => {
+                self.call_openai_compatible(
+                    &prompt,
+                    api_key,
+                    model,
+                    "https://api.x.ai/v1/chat/completions",
+                    net_config,
+                )
+                .await
+            }
+            Provider::OpenAI => {
+                self.call_openai_compatible(
+                    &prompt,
+                    api_key,
+                    model,
+                    "https://api.openai.com/v1/chat/completions",
+                    net_config,
+                )
+                .await
+            }
         }
     }
 
-    async fn call_anthropic(&self, prompt: &str, api_key: &str, model: &str, net_config: &NetworkConfig) -> Result<String> {
+    async fn call_anthropic(
+        &self,
+        prompt: &str,
+        api_key: &str,
+        model: &str,
+        net_config: &NetworkConfig,
+    ) -> Result<String> {
         #[derive(Serialize)]
         struct Message {
             role: String,
@@ -513,9 +534,7 @@ fn parse_analysis(text: &str) -> Result<SecurityAnalysis> {
     let mut current_section = "";
 
     // Strip common markdown formatting the LLM might add
-    let clean = text
-        .replace("**", "")
-        .replace("__", "");
+    let clean = text.replace("**", "").replace("__", "");
 
     for line in clean.lines() {
         let line = line.trim();
@@ -548,10 +567,12 @@ fn parse_analysis(text: &str) -> Result<SecurityAnalysis> {
                 "⚠".yellow()
             );
             if findings.is_empty() {
-                findings.push("AI response could not be parsed into structured format.".to_string());
+                findings
+                    .push("AI response could not be parsed into structured format.".to_string());
             }
             if recommendation.is_empty() {
-                recommendation = "Review the raw analysis below and use your own judgement.".to_string();
+                recommendation =
+                    "Review the raw analysis below and use your own judgement.".to_string();
                 // Include raw response as a finding so the user can still see it
                 findings.push(format!("Raw AI response:\n{}", text));
             }
@@ -620,7 +641,11 @@ async fn download_script(url: &str, net_config: &NetworkConfig) -> Result<String
 
     for attempt in 1..=max_attempts {
         if attempt > 1 {
-            spinner.set_message(format!("Downloading script... (retry {}/{})", attempt - 1, max_attempts - 1));
+            spinner.set_message(format!(
+                "Downloading script... (retry {}/{})",
+                attempt - 1,
+                max_attempts - 1
+            ));
             tokio::time::sleep(std::time::Duration::from_millis(1000 * attempt as u64)).await;
         }
 
@@ -646,6 +671,24 @@ async fn download_script(url: &str, net_config: &NetworkConfig) -> Result<String
                     continue;
                 }
 
+                // Validate content type looks like a script
+                if let Some(content_type) = response.headers().get("content-type") {
+                    let ct = content_type.to_str().unwrap_or("");
+                    let is_script_like = ct.contains("text/")
+                        || ct.contains("application/x-sh")
+                        || ct.contains("application/x-shellscript")
+                        || ct.contains("application/octet-stream")
+                        || ct.is_empty();
+
+                    if !is_script_like {
+                        eprintln!(
+                            "{} Content-Type is '{}' (expected script-like content)",
+                            "⚠".yellow(),
+                            ct
+                        );
+                    }
+                }
+
                 // Guard against excessively large responses (10 MB limit)
                 const MAX_SCRIPT_SIZE: u64 = 10 * 1024 * 1024;
                 if let Some(len) = response.content_length() {
@@ -668,10 +711,17 @@ async fn download_script(url: &str, net_config: &NetworkConfig) -> Result<String
 
                         if script.len() as u64 > MAX_SCRIPT_SIZE {
                             spinner.finish_and_clear();
-                            anyhow::bail!("Script too large ({:.1} MB)", script.len() as f64 / 1_048_576.0);
+                            anyhow::bail!(
+                                "Script too large ({:.1} MB)",
+                                script.len() as f64 / 1_048_576.0
+                            );
                         }
 
-                        spinner.finish_with_message(format!("{} Downloaded {} bytes", "✓".green(), script.len()));
+                        spinner.finish_with_message(format!(
+                            "{} Downloaded {} bytes",
+                            "✓".green(),
+                            script.len()
+                        ));
                         return Ok(script);
                     }
                     Err(e) => {
@@ -688,10 +738,16 @@ async fn download_script(url: &str, net_config: &NetworkConfig) -> Result<String
     }
 
     spinner.finish_and_clear();
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Failed to download script after {} attempts", max_attempts)))
+    Err(last_error.unwrap_or_else(|| {
+        anyhow::anyhow!("Failed to download script after {} attempts", max_attempts)
+    }))
 }
 
-async fn analyze_script(script: &str, config: &Config, net_config: &NetworkConfig) -> Result<SecurityAnalysis> {
+async fn analyze_script(
+    script: &str,
+    config: &Config,
+    net_config: &NetworkConfig,
+) -> Result<SecurityAnalysis> {
     let provider = Provider::from_str(&config.provider)?;
     let spinner = new_spinner(&format!("Analyzing script with {} AI...", provider.name()));
 
@@ -706,26 +762,17 @@ async fn analyze_script(script: &str, config: &Config, net_config: &NetworkConfi
 }
 
 fn prompt_user_confirmation() -> Result<bool> {
-    print!(
-        "\n{} ",
-        "Execute this script? [y/N]:".yellow().bold()
-    );
+    print!("\n{} ", "Execute this script? [y/N]:".yellow().bold());
     io::stdout().flush()?;
 
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
 
-    Ok(matches!(
-        input.trim().to_lowercase().as_str(),
-        "y" | "yes"
-    ))
+    Ok(matches!(input.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
 fn execute_script(script: &str, shell: &str) -> Result<()> {
-    println!(
-        "\n{}",
-        format!("Executing script with {}...", shell).cyan()
-    );
+    println!("\n{}", format!("Executing script with {}...", shell).cyan());
 
     let mut temp_file = NamedTempFile::new()?;
     temp_file.write_all(script.as_bytes())?;
@@ -793,7 +840,10 @@ async fn login_command(cli: &Cli) -> Result<()> {
 
     // Select provider
     println!("{}", "Available providers:".bold());
-    println!("  1. {} (Claude Sonnet 4.5, Haiku, Opus)", "Anthropic".cyan());
+    println!(
+        "  1. {} (Claude Sonnet 4.5, Haiku, Opus)",
+        "Anthropic".cyan()
+    );
     println!("  2. {} (Grok 2)", "xAI".cyan());
     println!("  3. {} (GPT-4, GPT-4o)", "OpenAI".cyan());
 
@@ -854,7 +904,8 @@ async fn login_command(cli: &Cli) -> Result<()> {
         .await
     {
         Ok(_) => {
-            spinner.finish_with_message(format!("{} API connection successful!", "✓".green().bold()));
+            spinner
+                .finish_with_message(format!("{} API connection successful!", "✓".green().bold()));
         }
         Err(e) => {
             spinner.finish_with_message(format!("{} API connection failed!", "✗".red().bold()));
@@ -883,7 +934,7 @@ async fn login_command(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-async fn config_command() -> Result<()> {
+fn config_command() -> Result<()> {
     let config = Config::load()?;
 
     println!("\n{}", "Current Configuration".bold());
@@ -921,10 +972,7 @@ async fn config_command() -> Result<()> {
     );
 
     println!("{}", "═".repeat(50).bright_black());
-    println!(
-        "\nTo reconfigure, run: {}",
-        "scurl login".green().bold()
-    );
+    println!("\nTo reconfigure, run: {}", "scurl login".green().bold());
 
     Ok(())
 }
@@ -953,8 +1001,7 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
     if cli.insecure {
         eprintln!(
             "{}",
-            "⚠️  SSL verification disabled — connection is not secure!"
-                .bright_yellow()
+            "⚠️  SSL verification disabled — connection is not secure!".bright_yellow()
         );
     }
 
@@ -1015,7 +1062,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Login) => login_command(&cli).await,
-        Some(Commands::Config) => config_command().await,
+        Some(Commands::Config) => config_command(),
         Some(Commands::Analyze { ref url }) => analyze_command(url, &cli).await,
         None => {
             if let Some(ref url) = cli.url {
@@ -1032,5 +1079,154 @@ async fn main() -> Result<()> {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_risk_level_from_str() {
+        assert_eq!(RiskLevel::from_str("safe"), RiskLevel::Safe);
+        assert_eq!(RiskLevel::from_str("SAFE"), RiskLevel::Safe);
+        assert_eq!(RiskLevel::from_str("low"), RiskLevel::Low);
+        assert_eq!(RiskLevel::from_str("critical"), RiskLevel::Critical);
+        assert_eq!(RiskLevel::from_str("unknown"), RiskLevel::Medium);
+    }
+
+    #[test]
+    fn test_risk_level_is_probably_safe() {
+        assert!(RiskLevel::Safe.is_probably_safe());
+        assert!(RiskLevel::Low.is_probably_safe());
+        assert!(!RiskLevel::Medium.is_probably_safe());
+        assert!(!RiskLevel::High.is_probably_safe());
+        assert!(!RiskLevel::Critical.is_probably_safe());
+    }
+
+    #[test]
+    fn test_parse_analysis_valid() {
+        let text = r#"
+RISK_LEVEL: LOW
+FINDINGS:
+- Uses sudo for installation
+- Downloads from GitHub
+RECOMMENDATION: This script appears safe to execute.
+"#;
+
+        let result = parse_analysis(text).unwrap();
+        assert_eq!(result.risk_level, RiskLevel::Low);
+        assert_eq!(result.findings.len(), 2);
+        assert!(result.recommendation.contains("safe"));
+    }
+
+    #[test]
+    fn test_parse_analysis_with_markdown() {
+        let text = r#"
+**RISK_LEVEL:** SAFE
+**FINDINGS:**
+- No issues found
+**RECOMMENDATION:** Safe to run.
+"#;
+
+        let result = parse_analysis(text).unwrap();
+        assert_eq!(result.risk_level, RiskLevel::Safe);
+        assert_eq!(result.findings.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_analysis_missing_risk_defaults_to_high() {
+        let text = r#"
+FINDINGS:
+- Some finding
+RECOMMENDATION: Some recommendation
+"#;
+
+        let result = parse_analysis(text).unwrap();
+        // Should default to HIGH when risk level can't be parsed
+        assert_eq!(result.risk_level, RiskLevel::High);
+    }
+
+    #[test]
+    fn test_provider_from_str() {
+        assert!(matches!(
+            Provider::from_str("anthropic").unwrap(),
+            Provider::Anthropic
+        ));
+        assert!(matches!(
+            Provider::from_str("claude").unwrap(),
+            Provider::Anthropic
+        ));
+        assert!(matches!(Provider::from_str("xai").unwrap(), Provider::XAI));
+        assert!(matches!(Provider::from_str("grok").unwrap(), Provider::XAI));
+        assert!(matches!(
+            Provider::from_str("openai").unwrap(),
+            Provider::OpenAI
+        ));
+        assert!(Provider::from_str("invalid").is_err());
+    }
+
+    #[test]
+    fn test_provider_default_models() {
+        let anthropic = Provider::Anthropic;
+        assert!(anthropic.default_model().contains("claude"));
+
+        let xai = Provider::XAI;
+        assert_eq!(xai.default_model(), "grok-2-latest");
+
+        let openai = Provider::OpenAI;
+        assert_eq!(openai.default_model(), "gpt-4o");
+    }
+
+    #[test]
+    fn test_network_config_parse_headers() {
+        let config = NetworkConfig {
+            headers: vec![
+                "Authorization: Bearer token".to_string(),
+                "X-Custom: value".to_string(),
+            ],
+            proxy: None,
+            timeout: 30,
+            max_redirects: 10,
+            insecure: false,
+            user_agent: None,
+            retries: 3,
+            system_proxy: false,
+            no_proxy: false,
+        };
+
+        let parsed = config.parse_headers().unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(
+            parsed[0],
+            ("Authorization".to_string(), "Bearer token".to_string())
+        );
+        assert_eq!(parsed[1], ("X-Custom".to_string(), "value".to_string()));
+    }
+
+    #[test]
+    fn test_network_config_parse_headers_invalid() {
+        let config = NetworkConfig {
+            headers: vec!["InvalidHeader".to_string()],
+            proxy: None,
+            timeout: 30,
+            max_redirects: 10,
+            insecure: false,
+            user_agent: None,
+            retries: 3,
+            system_proxy: false,
+            no_proxy: false,
+        };
+
+        assert!(config.parse_headers().is_err());
+    }
+
+    #[test]
+    fn test_config_paths() {
+        let config_dir = Config::config_dir().unwrap();
+        assert!(config_dir.ends_with(".scurl"));
+
+        let config_path = Config::config_path().unwrap();
+        assert!(config_path.ends_with("config.toml"));
     }
 }
