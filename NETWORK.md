@@ -426,6 +426,3 @@ scurl \
   URL
 ```
 
----
-
-**Got network issues? Check NETWORK.md for solutions!** 🌐

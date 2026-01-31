@@ -239,6 +239,7 @@ enum Provider {
     Anthropic,
     XAI,
     OpenAI,
+    Ollama,
 }
 
 impl Provider {
@@ -247,6 +248,7 @@ impl Provider {
             "anthropic" | "claude" => Ok(Provider::Anthropic),
             "xai" | "x.ai" | "grok" => Ok(Provider::XAI),
             "openai" | "chatgpt" => Ok(Provider::OpenAI),
+            "ollama" | "local" => Ok(Provider::Ollama),
             _ => anyhow::bail!("Unknown provider: {}", s),
         }
     }
@@ -256,6 +258,7 @@ impl Provider {
             Provider::Anthropic => "Anthropic (Claude)",
             Provider::XAI => "xAI (Grok)",
             Provider::OpenAI => "OpenAI (GPT)",
+            Provider::Ollama => "Ollama (Local)",
         }
     }
 
@@ -264,6 +267,7 @@ impl Provider {
             Provider::Anthropic => "claude-sonnet-4-5-20250929",
             Provider::XAI => "grok-2-latest",
             Provider::OpenAI => "gpt-4o",
+            Provider::Ollama => "llama3.2",
         }
     }
 
@@ -327,6 +331,16 @@ Be practical: common patterns like sudo for installation, downloading from offic
                     api_key,
                     model,
                     "https://api.openai.com/v1/chat/completions",
+                    net_config,
+                )
+                .await
+            }
+            Provider::Ollama => {
+                self.call_openai_compatible(
+                    &prompt,
+                    api_key,
+                    model,
+                    "http://localhost:11434/v1/chat/completions",
                     net_config,
                 )
                 .await
@@ -846,13 +860,15 @@ async fn login_command(cli: &Cli) -> Result<()> {
     );
     println!("  2. {} (Grok 2)", "xAI".cyan());
     println!("  3. {} (GPT-4, GPT-4o)", "OpenAI".cyan());
+    println!("  4. {} (Local models via Ollama)", "Ollama".cyan());
 
-    let choice = prompt("\nSelect provider [1-3]: ")?;
+    let choice = prompt("\nSelect provider [1-4]: ")?;
 
     let provider_name = match choice.as_str() {
         "1" => "anthropic",
         "2" => "xai",
         "3" => "openai",
+        "4" => "ollama",
         _ => {
             anyhow::bail!("Invalid choice. Please run 'scurl login' again.");
         }
@@ -867,18 +883,39 @@ async fn login_command(cli: &Cli) -> Result<()> {
     );
 
     // Get API key
-    println!("\n{}", "Get your API key:".bold());
-    match provider {
-        Provider::Anthropic => println!("  → https://console.anthropic.com"),
-        Provider::XAI => println!("  → https://console.x.ai"),
-        Provider::OpenAI => println!("  → https://platform.openai.com/api-keys"),
-    }
+    let api_key = if matches!(provider, Provider::Ollama) {
+        println!("\n{}", "Ollama Setup:".bold());
+        println!("  → Install Ollama from https://ollama.ai");
+        println!("  → Run: ollama pull llama3.2 (or your preferred model)");
+        println!("  → Ensure Ollama is running: ollama serve");
+        println!(
+            "\n{}",
+            "Note: Ollama doesn't require an API key".bright_black()
+        );
 
-    let api_key = prompt("\nEnter your API key: ")?;
+        let api_key_input = prompt("\nEnter API key (press Enter to skip for Ollama): ")?;
+        if api_key_input.is_empty() {
+            "ollama-no-key".to_string()
+        } else {
+            api_key_input
+        }
+    } else {
+        println!("\n{}", "Get your API key:".bold());
+        match provider {
+            Provider::Anthropic => println!("  → https://console.anthropic.com"),
+            Provider::XAI => println!("  → https://console.x.ai"),
+            Provider::OpenAI => println!("  → https://platform.openai.com/api-keys"),
+            Provider::Ollama => unreachable!(),
+        }
 
-    if api_key.is_empty() {
-        anyhow::bail!("API key cannot be empty");
-    }
+        let api_key_input = prompt("\nEnter your API key: ")?;
+
+        if api_key_input.is_empty() {
+            anyhow::bail!("API key cannot be empty");
+        }
+
+        api_key_input
+    };
 
     // Optional: custom model
     println!(
@@ -1163,6 +1200,14 @@ RECOMMENDATION: Some recommendation
             Provider::from_str("openai").unwrap(),
             Provider::OpenAI
         ));
+        assert!(matches!(
+            Provider::from_str("ollama").unwrap(),
+            Provider::Ollama
+        ));
+        assert!(matches!(
+            Provider::from_str("local").unwrap(),
+            Provider::Ollama
+        ));
         assert!(Provider::from_str("invalid").is_err());
     }
 
@@ -1176,6 +1221,9 @@ RECOMMENDATION: Some recommendation
 
         let openai = Provider::OpenAI;
         assert_eq!(openai.default_model(), "gpt-4o");
+
+        let ollama = Provider::Ollama;
+        assert_eq!(ollama.default_model(), "llama3.2");
     }
 
     #[test]

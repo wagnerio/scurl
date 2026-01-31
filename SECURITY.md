@@ -37,6 +37,7 @@ When available, use API keys with minimal required permissions:
 - **Anthropic**: Use keys with API access only
 - **xAI**: Limit to model access
 - **OpenAI**: Use project-scoped keys
+- **Ollama**: No API key needed -- runs locally
 
 #### 3. Rotate Keys Regularly
 ```bash
@@ -157,6 +158,12 @@ If you discover a security vulnerability in scurl:
 1. Revoke key in OpenAI dashboard
 2. Generate new project-scoped key
 3. Run `scurl login` with new key
+
+### Ollama
+- No API key stored (uses placeholder)
+- Runs entirely on localhost
+- No credentials to compromise
+- Scripts are only sent to your local machine
 
 ## Script Execution Security
 
