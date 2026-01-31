@@ -1,4 +1,4 @@
-# scurl
+# scurl (security check url)
 
 AI-powered security review for installation scripts. Stop blindly piping `curl | bash`.
 

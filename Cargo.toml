@@ -5,6 +5,11 @@ edition = "2021"
 authors = ["scurl contributors"]
 description = "Secure curl - AI-powered security review for install scripts"
 license = "MIT"
+repository = "https://github.com/wagnerio/scurl"
+homepage = "https://github.com/wagnerio/scurl"
+readme = "README.md"
+keywords = ["security", "curl", "ai", "shell", "cli"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
