@@ -12,6 +12,14 @@ You're executing unreviewed code with your user privileges. scurl downloads the 
 
 ## Install
 
+### From crates.io
+
+```bash
+cargo install scurl
+```
+
+### From source
+
 ```bash
 git clone https://github.com/wagnerio/scurl.git
 cd scurl
