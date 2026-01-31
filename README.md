@@ -34,25 +34,54 @@ This pattern is dangerous because:
 ```bash
 git clone https://github.com/yourusername/scurl.git
 cd scurl
+
+# Enable git hooks (prevents committing secrets)
+git config core.hooksPath .githooks
+
+# Build and install
 cargo install --path .
 ```
 
 ### Prerequisites
 
 - Rust 1.70+ (install from [rustup.rs](https://rustup.rs))
-- Anthropic API key (get one at [console.anthropic.com](https://console.anthropic.com))
+- AI Provider API key:
+  - **Anthropic**: [console.anthropic.com](https://console.anthropic.com)
+  - **xAI**: [console.x.ai](https://console.x.ai)
+  - **OpenAI**: [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
+
+### Initial Setup
+
+After installation, run the interactive setup:
+
+```bash
+scurl login
+```
+
+This will guide you through:
+1. Selecting your AI provider (Anthropic, xAI, or OpenAI)
+2. Entering your API key
+3. Optional: Choosing a custom model
+4. Testing the connection
+
+Your configuration is saved to `~/.scurl/config.toml`
 
 ## Usage
 
 ### Basic Usage
 
-```bash
-# Set your API key
-export ANTHROPIC_API_KEY=sk-ant-...
+After running `scurl login`, just use scurl with any install script URL:
 
+```bash
 # Review and potentially execute a script
 scurl https://example.com/install.sh
 ```
+
+The script will be:
+1. Downloaded
+2. Analyzed by your configured AI provider
+3. Results displayed with risk level and findings
+4. You decide whether to execute
 
 ### Auto-execute Safe Scripts
 
@@ -140,9 +169,20 @@ Recommendation:
 Execute this script? [y/N]:
 ```
 
-## Environment Variables
+## Configuration
 
-- `ANTHROPIC_API_KEY` - Your Anthropic API key (required)
+scurl stores your configuration in `~/.scurl/config.toml`:
+
+```toml
+provider = "xai"
+api_key = "xai-xxxxxxxxxxxxx"
+model = "grok-2-latest"  # optional
+```
+
+You can:
+- **View config**: `scurl config`
+- **Update config**: `scurl login` (re-run to change provider or key)
+- **Override temporarily**: Use `--provider` and `--api-key` flags
 
 ## Safety Notes
 
@@ -154,14 +194,44 @@ Execute this script? [y/N]:
 
 ## Contributing
 
-Contributions welcome! Areas for improvement:
+Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
+
+### Development Setup
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/scurl.git
+cd scurl
+
+# Enable git hooks (IMPORTANT - prevents committing secrets!)
+git config core.hooksPath .githooks
+
+# Build and test
+cargo build
+cargo test
+cargo clippy
+```
+
+### Git Hooks
+
+This project includes a smart pre-commit hook that prevents accidentally committing API keys:
+
+- ✅ Automatically installed when you run `git config core.hooksPath .githooks`
+- ✅ Blocks real API keys in code files
+- ✅ Allows placeholder examples in documentation (e.g., `sk-ant-xxx`)
+- ✅ Checks for `config.toml` files
+
+**Why this matters:** API keys are secrets and should never be committed to version control!
+
+### Areas for Improvement
 
 - Additional security checks
-- Support for other AI providers
+- Enhanced AI analysis prompts
 - Script sandboxing
 - Checksum verification
 - Source reputation scoring
 - Caching of known-safe scripts
+- Browser extension integration
 
 ## License
 

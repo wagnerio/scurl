@@ -1,0 +1,60 @@
+#!/bin/bash
+# Smart pre-commit hook - prevents committing real API keys
+# Ignores placeholders in documentation
+
+echo "🔍 Checking for API keys..."
+
+# Get list of staged files (excluding .md documentation)
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -vE '\.(md|example)$')
+
+if [ -z "$STAGED_FILES" ]; then
+    echo "✅ No code files to check"
+    exit 0
+fi
+
+# Check for real API key patterns (not placeholders)
+FOUND_SECRETS=0
+
+for FILE in $STAGED_FILES; do
+    # Check for real Anthropic keys (not placeholders like sk-ant-xxx)
+    if git diff --cached "$FILE" | grep -qE '\+.*sk-ant-[a-zA-Z0-9]{40,}'; then
+        echo "❌ Real Anthropic API key detected in: $FILE"
+        FOUND_SECRETS=1
+    fi
+    
+    # Check for real xAI keys (not placeholders like xai-xxx)
+    if git diff --cached "$FILE" | grep -qE '\+.*xai-[a-zA-Z0-9]{40,}'; then
+        echo "❌ Real xAI API key detected in: $FILE"
+        FOUND_SECRETS=1
+    fi
+    
+    # Check for real OpenAI keys (not placeholders)
+    if git diff --cached "$FILE" | grep -qE '\+.*sk-proj-[a-zA-Z0-9]{40,}'; then
+        echo "❌ Real OpenAI API key detected in: $FILE"
+        FOUND_SECRETS=1
+    fi
+    
+    # Check for config.toml with real values
+    if [[ "$FILE" == *"config.toml" ]] && [[ "$FILE" != *".example"* ]]; then
+        echo "❌ Attempting to commit config.toml: $FILE"
+        FOUND_SECRETS=1
+    fi
+done
+
+if [ $FOUND_SECRETS -eq 1 ]; then
+    echo ""
+    echo "⚠️  ERROR: Real API keys or secrets detected!"
+    echo ""
+    echo "What to do:"
+    echo "  1. Remove the secret from the file"
+    echo "  2. Use placeholders in documentation (sk-ant-xxx, xai-xxx)"
+    echo "  3. Add sensitive files to .gitignore"
+    echo ""
+    echo "To bypass this check (NOT RECOMMENDED):"
+    echo "  git commit --no-verify"
+    echo ""
+    exit 1
+fi
+
+echo "✅ No real secrets detected in code files"
+exit 0
