@@ -2,7 +2,7 @@
 name = "scurl"
 version = "0.1.0"
 edition = "2021"
-authors = ["scurl contributors"]
+authors = ["scurl contributors <scurl-rust@pm.me>"]
 description = "Secure curl - AI-powered security review for install scripts"
 license = "MIT"
 repository = "https://github.com/wagnerio/scurl"
@@ -16,7 +16,6 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 tokio = { version = "1.0", features = ["full"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 anyhow = "1.0"
 colored = "2.1"
 tempfile = "3.10"

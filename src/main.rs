@@ -154,66 +154,55 @@ enum Commands {
 
 #[derive(Debug, Clone)]
 struct NetworkConfig {
-    proxy: Option<String>,
-    timeout: u64,
-    max_redirects: usize,
-    insecure: bool,
-    user_agent: Option<String>,
     headers: Vec<String>,
     retries: usize,
-    system_proxy: bool,
-    no_proxy: bool,
+    client: reqwest::Client,
 }
 
 impl NetworkConfig {
-    fn from_cli(cli: &Cli) -> Self {
-        Self {
-            proxy: cli.proxy.clone(),
-            timeout: cli.timeout,
-            max_redirects: cli.max_redirects,
-            insecure: cli.insecure,
-            user_agent: cli.user_agent.clone(),
-            headers: cli.headers.clone(),
-            retries: cli.retries,
-            system_proxy: cli.system_proxy,
-            no_proxy: cli.no_proxy,
-        }
-    }
+    fn from_cli(cli: &Cli) -> Result<Self> {
+        let timeout = cli.timeout;
+        let max_redirects = cli.max_redirects;
+        let insecure = cli.insecure;
+        let no_proxy = cli.no_proxy;
+        let proxy = cli.proxy.clone();
+        let system_proxy = cli.system_proxy;
+        let user_agent = cli.user_agent.clone();
 
-    fn build_client(&self) -> Result<reqwest::Client> {
         let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(self.timeout))
-            .redirect(if self.max_redirects > 0 {
-                reqwest::redirect::Policy::limited(self.max_redirects)
+            .timeout(std::time::Duration::from_secs(timeout))
+            .redirect(if max_redirects > 0 {
+                reqwest::redirect::Policy::limited(max_redirects)
             } else {
                 reqwest::redirect::Policy::none()
             });
 
-        // SSL/TLS configuration
-        if self.insecure {
+        if insecure {
             builder = builder.danger_accept_invalid_certs(true);
         }
 
-        // Proxy configuration
-        if self.no_proxy {
+        if no_proxy {
             builder = builder.no_proxy();
-        } else if let Some(ref proxy_url) = self.proxy {
-            let proxy = reqwest::Proxy::all(proxy_url).context("Invalid proxy URL")?;
-            builder = builder.proxy(proxy);
-        } else if self.system_proxy {
+        } else if let Some(ref proxy_url) = proxy {
+            let p = reqwest::Proxy::all(proxy_url).context("Invalid proxy URL")?;
+            builder = builder.proxy(p);
+        } else if system_proxy {
             // System proxy is enabled by default in reqwest
-            // We don't need to do anything special
         }
 
-        // User-Agent
-        if let Some(ref ua) = self.user_agent {
-            builder = builder.user_agent(ua);
+        if let Some(ref ua) = user_agent {
+            builder = builder.user_agent(ua.clone());
         } else {
             builder = builder.user_agent(format!("scurl/{}", env!("CARGO_PKG_VERSION")));
         }
 
-        // Build the client
-        builder.build().context("Failed to build HTTP client")
+        let client = builder.build().context("Failed to build HTTP client")?;
+
+        Ok(Self {
+            headers: cli.headers.clone(),
+            retries: cli.retries,
+            client,
+        })
     }
 
     fn parse_headers(&self) -> Result<Vec<(String, String)>> {
@@ -242,8 +231,10 @@ enum Provider {
     Ollama,
 }
 
-impl Provider {
-    fn from_str(s: &str) -> Result<Self> {
+impl std::str::FromStr for Provider {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "anthropic" | "claude" => Ok(Provider::Anthropic),
             "xai" | "x.ai" | "grok" => Ok(Provider::XAI),
@@ -252,7 +243,9 @@ impl Provider {
             _ => anyhow::bail!("Unknown provider: {}", s),
         }
     }
+}
 
+impl Provider {
     fn name(&self) -> &str {
         match self {
             Provider::Anthropic => "Anthropic (Claude)",
@@ -310,42 +303,67 @@ Be practical: common patterns like sudo for installation, downloading from offic
             script
         );
 
-        match self {
-            Provider::Anthropic => {
-                self.call_anthropic(&prompt, api_key, model, net_config)
+        let max_attempts = net_config.retries.max(1);
+        let mut last_error = None;
+
+        for attempt in 1..=max_attempts {
+            if attempt > 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(1000 * attempt as u64)).await;
+            }
+
+            let result = match self {
+                Provider::Anthropic => {
+                    self.call_anthropic(&prompt, api_key, model, net_config)
+                        .await
+                }
+                Provider::XAI => {
+                    self.call_openai_compatible(
+                        &prompt,
+                        api_key,
+                        model,
+                        "https://api.x.ai/v1/chat/completions",
+                        net_config,
+                    )
                     .await
-            }
-            Provider::XAI => {
-                self.call_openai_compatible(
-                    &prompt,
-                    api_key,
-                    model,
-                    "https://api.x.ai/v1/chat/completions",
-                    net_config,
-                )
-                .await
-            }
-            Provider::OpenAI => {
-                self.call_openai_compatible(
-                    &prompt,
-                    api_key,
-                    model,
-                    "https://api.openai.com/v1/chat/completions",
-                    net_config,
-                )
-                .await
-            }
-            Provider::Ollama => {
-                self.call_openai_compatible(
-                    &prompt,
-                    api_key,
-                    model,
-                    "http://localhost:11434/v1/chat/completions",
-                    net_config,
-                )
-                .await
+                }
+                Provider::OpenAI => {
+                    self.call_openai_compatible(
+                        &prompt,
+                        api_key,
+                        model,
+                        "https://api.openai.com/v1/chat/completions",
+                        net_config,
+                    )
+                    .await
+                }
+                Provider::Ollama => {
+                    self.call_openai_compatible(
+                        &prompt,
+                        api_key,
+                        model,
+                        "http://localhost:11434/v1/chat/completions",
+                        net_config,
+                    )
+                    .await
+                }
+            };
+
+            match result {
+                Ok(text) => return Ok(text),
+                Err(e) => {
+                    let err_str = e.to_string();
+                    // Don't retry client errors (4xx) — they won't succeed on retry
+                    if err_str.contains("API error 4") {
+                        return Err(e);
+                    }
+                    last_error = Some(e);
+                }
             }
         }
+
+        Err(last_error.unwrap_or_else(|| {
+            anyhow::anyhow!("AI analysis failed after {} attempts", max_attempts)
+        }))
     }
 
     async fn call_anthropic(
@@ -378,7 +396,6 @@ Be practical: common patterns like sudo for installation, downloading from offic
             content: Vec<ContentBlock>,
         }
 
-        let client = net_config.build_client()?;
         let request = Request {
             model: model.to_string(),
             max_tokens: 2048,
@@ -388,7 +405,8 @@ Be practical: common patterns like sudo for installation, downloading from offic
             }],
         };
 
-        let response = client
+        let response = net_config
+            .client
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
@@ -453,7 +471,6 @@ Be practical: common patterns like sudo for installation, downloading from offic
             choices: Vec<Choice>,
         }
 
-        let client = net_config.build_client()?;
         let request = Request {
             model: model.to_string(),
             messages: vec![Message {
@@ -463,10 +480,17 @@ Be practical: common patterns like sudo for installation, downloading from offic
             max_tokens: Some(2048),
         };
 
-        let response = client
+        let mut req = net_config
+            .client
             .post(endpoint)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+
+        // Skip Authorization header for Ollama (local, no API key needed)
+        if !matches!(self, Provider::Ollama) {
+            req = req.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let response = req
             .json(&request)
             .send()
             .await
@@ -521,7 +545,7 @@ impl RiskLevel {
             "medium" => RiskLevel::Medium,
             "high" => RiskLevel::High,
             "critical" => RiskLevel::Critical,
-            _ => RiskLevel::Medium,
+            _ => RiskLevel::High,
         }
     }
 
@@ -647,7 +671,7 @@ fn display_analysis(analysis: &SecurityAnalysis) {
 async fn download_script(url: &str, net_config: &NetworkConfig) -> Result<String> {
     let spinner = new_spinner("Downloading script...");
 
-    let client = net_config.build_client()?;
+    let client = &net_config.client;
     let headers = net_config.parse_headers()?;
 
     let mut last_error = None;
@@ -762,7 +786,7 @@ async fn analyze_script(
     config: &Config,
     net_config: &NetworkConfig,
 ) -> Result<SecurityAnalysis> {
-    let provider = Provider::from_str(&config.provider)?;
+    let provider: Provider = config.provider.parse()?;
     let spinner = new_spinner(&format!("Analyzing script with {} AI...", provider.name()));
 
     // Perform analysis
@@ -874,7 +898,7 @@ async fn login_command(cli: &Cli) -> Result<()> {
         }
     };
 
-    let provider = Provider::from_str(provider_name)?;
+    let provider: Provider = provider_name.parse()?;
 
     println!(
         "\n{} {}",
@@ -933,7 +957,7 @@ async fn login_command(cli: &Cli) -> Result<()> {
 
     // Test the configuration (respects --proxy and other network flags)
     let spinner = new_spinner("Testing API connection...");
-    let net_config = NetworkConfig::from_cli(cli);
+    let net_config = NetworkConfig::from_cli(cli)?;
 
     let test_script = "#!/bin/bash\necho 'Hello, World!'";
     match provider
@@ -977,7 +1001,7 @@ fn config_command() -> Result<()> {
     println!("\n{}", "Current Configuration".bold());
     println!("{}", "═".repeat(50).bright_black());
 
-    let provider = Provider::from_str(&config.provider)?;
+    let provider: Provider = config.provider.parse()?;
     println!("{:15} {}", "Provider:".bright_white(), provider.name());
 
     let masked_key = {
@@ -1021,19 +1045,27 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
         "- Secure Script Execution".bright_white()
     );
 
-    // Load config or use CLI overrides
-    let mut config = Config::load()?;
+    // Load config or build from CLI overrides
+    let config = match (&cli.provider, &cli.api_key) {
+        (Some(provider), Some(api_key)) => Config {
+            provider: provider.clone(),
+            api_key: api_key.clone(),
+            model: None,
+        },
+        _ => {
+            let mut cfg = Config::load()?;
+            if let Some(ref api_key) = cli.api_key {
+                cfg.api_key = api_key.clone();
+            }
+            if let Some(ref provider) = cli.provider {
+                cfg.provider = provider.clone();
+            }
+            cfg
+        }
+    };
 
-    if let Some(ref api_key) = cli.api_key {
-        config.api_key = api_key.clone();
-    }
-
-    if let Some(ref provider) = cli.provider {
-        config.provider = provider.clone();
-    }
-
-    // Build network configuration from CLI
-    let net_config = NetworkConfig::from_cli(cli);
+    // Build network configuration and HTTP client from CLI
+    let net_config = NetworkConfig::from_cli(cli)?;
 
     if cli.insecure {
         eprintln!(
@@ -1129,7 +1161,7 @@ mod tests {
         assert_eq!(RiskLevel::from_str("SAFE"), RiskLevel::Safe);
         assert_eq!(RiskLevel::from_str("low"), RiskLevel::Low);
         assert_eq!(RiskLevel::from_str("critical"), RiskLevel::Critical);
-        assert_eq!(RiskLevel::from_str("unknown"), RiskLevel::Medium);
+        assert_eq!(RiskLevel::from_str("unknown"), RiskLevel::High);
     }
 
     #[test]
@@ -1187,28 +1219,28 @@ RECOMMENDATION: Some recommendation
     #[test]
     fn test_provider_from_str() {
         assert!(matches!(
-            Provider::from_str("anthropic").unwrap(),
+            "anthropic".parse::<Provider>().unwrap(),
             Provider::Anthropic
         ));
         assert!(matches!(
-            Provider::from_str("claude").unwrap(),
+            "claude".parse::<Provider>().unwrap(),
             Provider::Anthropic
         ));
-        assert!(matches!(Provider::from_str("xai").unwrap(), Provider::XAI));
-        assert!(matches!(Provider::from_str("grok").unwrap(), Provider::XAI));
+        assert!(matches!("xai".parse::<Provider>().unwrap(), Provider::XAI));
+        assert!(matches!("grok".parse::<Provider>().unwrap(), Provider::XAI));
         assert!(matches!(
-            Provider::from_str("openai").unwrap(),
+            "openai".parse::<Provider>().unwrap(),
             Provider::OpenAI
         ));
         assert!(matches!(
-            Provider::from_str("ollama").unwrap(),
+            "ollama".parse::<Provider>().unwrap(),
             Provider::Ollama
         ));
         assert!(matches!(
-            Provider::from_str("local").unwrap(),
+            "local".parse::<Provider>().unwrap(),
             Provider::Ollama
         ));
-        assert!(Provider::from_str("invalid").is_err());
+        assert!("invalid".parse::<Provider>().is_err());
     }
 
     #[test]
@@ -1233,14 +1265,8 @@ RECOMMENDATION: Some recommendation
                 "Authorization: Bearer token".to_string(),
                 "X-Custom: value".to_string(),
             ],
-            proxy: None,
-            timeout: 30,
-            max_redirects: 10,
-            insecure: false,
-            user_agent: None,
             retries: 3,
-            system_proxy: false,
-            no_proxy: false,
+            client: reqwest::Client::new(),
         };
 
         let parsed = config.parse_headers().unwrap();
@@ -1256,14 +1282,8 @@ RECOMMENDATION: Some recommendation
     fn test_network_config_parse_headers_invalid() {
         let config = NetworkConfig {
             headers: vec!["InvalidHeader".to_string()],
-            proxy: None,
-            timeout: 30,
-            max_redirects: 10,
-            insecure: false,
-            user_agent: None,
             retries: 3,
-            system_proxy: false,
-            no_proxy: false,
+            client: reqwest::Client::new(),
         };
 
         assert!(config.parse_headers().is_err());
