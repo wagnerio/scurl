@@ -2132,7 +2132,7 @@ RECOMMENDATION: Some recommendation
         assert_eq!(openai.default_model(), "gpt-5-nano");
 
         let azure = Provider::AzureOpenAI;
-        assert_eq!(azure.default_model(), "gpt-4o");
+        assert_eq!(azure.default_model(), "gpt-5-nano");
 
         let gemini = Provider::Gemini;
         assert!(gemini.default_model().contains("gemini"));
