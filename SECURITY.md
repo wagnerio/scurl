@@ -116,14 +116,37 @@ If you discover a security vulnerability in scurl:
 ✅ **HTTPS only** - All API calls use secure connections  
 ✅ **No telemetry** - We don't collect usage data  
 ✅ **Open source** - Code is auditable  
-✅ **Sandboxed execution** - Scripts run in temporary files  
+✅ **Sandboxed execution** - Scripts run in an OS-level sandbox by default
 
 ### What scurl Doesn't Do
 
-❌ **No key encryption** - Config file is plain text (OS-level encryption recommended)  
-❌ **No key rotation** - You must manually update keys  
-❌ **No audit logging** - No built-in logging of API calls  
-❌ **No multi-user support** - One config per user account  
+❌ **No key rotation** - You must manually update keys
+❌ **No multi-user support** - One config per user account
+
+### Additional Security Features
+
+- **OS Keyring Integration** - API keys can be stored in the OS keyring (macOS Keychain, Windows Credential Manager, Linux Secret Service) instead of plaintext config files. Run `scurl login` and the key will be stored in the keyring automatically when available.
+- **Audit Logging** - Every analysis is logged to `~/.scurl/audit.log` with timestamp, URL, SHA-256 hash, findings summary, risk level, and execution decision. The log file has `0600` permissions.
+- **Script SHA-256 Hashing** - SHA-256 hashes are computed and displayed for every downloaded script, enabling verification and traceability.
+- **Shell Validation** - The `--shell` flag is validated against an allowlist of known shells (`bash`, `sh`, `zsh`, `fish`, `dash`, `ksh`, `csh`, `tcsh`) and verified to exist on the system.
+- **Null Byte Detection** - Downloaded scripts are rejected if they contain null bytes, preventing binary injection.
+- **AI Contradiction Detection** - If AI analysis rates a script as SAFE/LOW but mentions dangerous keywords (reverse shell, backdoor, etc.), the risk level is automatically escalated.
+
+### Sandboxed Execution
+
+Script execution is sandboxed by default using OS-level isolation. Opt out with `--no-sandbox`.
+
+**Backends:**
+- **Linux (preferred):** [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) — unprivileged, namespace-based sandbox. Install: `sudo apt install bubblewrap` (Debian/Ubuntu) or `sudo dnf install bubblewrap` (Fedora).
+- **Linux (fallback):** [firejail](https://firejail.wordpress.com/) — SUID-based sandbox. Used when bwrap is not available, with a warning about its SUID model.
+- **macOS:** `sandbox-exec` — built-in macOS sandboxing via Seatbelt profiles.
+
+**What the sandbox restricts:**
+- **Network:** All network access is denied (no outbound connections, loopback only on Linux with bwrap).
+- **Filesystem:** Root filesystem is read-only. Only `/tmp` is writable. System directories (`/usr`, `/bin`, `/lib`, `/etc`) are mounted read-only.
+- **Process isolation (bwrap):** PID, IPC, UTS, and cgroup namespaces are isolated. Terminal injection is prevented via `--new-session`.
+
+If sandboxing is enabled and no backend is found, scurl will refuse to execute and print installation instructions. This is intentional — silent fallback to unsandboxed execution would defeat the purpose of a security tool.
 
 ## API Key Security by Provider
 
@@ -207,6 +230,8 @@ docker run -it ubuntu bash
 - May have false positives
 - Context-dependent (official repo vs. random site)
 - No guarantee of safety
+- Static analysis patterns cover known attack vectors but cannot detect novel obfuscation techniques
+- Contradiction detection catches obvious misclassifications but cannot prevent all prompt injection
 
 **Always use your judgment!**
 

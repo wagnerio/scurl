@@ -132,6 +132,7 @@ Environment variables `HTTPS_PROXY` and `HTTP_PROXY` are respected automatically
 | `--max-redirects <N>` | | Max redirects (default: 10) |
 | `--system-proxy` | | Use system proxy settings |
 | `--no-proxy` | | Disable proxy |
+| `--no-sandbox` | | Disable sandboxed script execution |
 | `--version` | `-V` | Print version |
 
 ### Environment Variables
@@ -191,6 +192,10 @@ Downloads are rejected if the content type indicates a non-script file (images, 
 ### Retry with Backoff
 
 Network retries use exponential backoff with jitter (1s, 2s, 4s... capped at 30s) to avoid thundering herd issues. Client errors (4xx) are not retried.
+
+### Sandboxed Execution
+
+Scripts run inside an OS-level sandbox by default. Network access is denied and the filesystem is read-only (except `/tmp`). On Linux, scurl uses [bubblewrap](https://github.com/containers/bubblewrap) (preferred) or firejail as a fallback. On macOS, it uses `sandbox-exec`. If no backend is found, execution is refused with install instructions. Opt out with `--no-sandbox`. See [SECURITY.md](SECURITY.md) for full details.
 
 ### Limitations
 
