@@ -24,6 +24,7 @@ use container::{
     classify_alert, display_container_result, execute_in_container, AlertSeverity,
     ContainerResult, FalcoAlert,
 };
+// container::detect_podman and container::detect_runsc used via qualified paths in resolve_runtime
 use helpers::{
     analyze_script, display_second_opinion, download_script, prompt_user_confirmation,
     runtime_ai_review, second_opinion_analysis, validate_shell, validate_url,
@@ -53,6 +54,115 @@ impl std::fmt::Display for MonitorLevel {
             MonitorLevel::Low => write!(f, "low"),
             MonitorLevel::Medium => write!(f, "medium"),
             MonitorLevel::High => write!(f, "high"),
+        }
+    }
+}
+
+// ============================================================================
+// Runtime Isolation
+// ============================================================================
+
+/// Runtime isolation backend for script execution.
+#[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
+pub(crate) enum RuntimeIsolation {
+    /// Auto-detect best available: podman-gvisor > podman > OS sandbox
+    Auto,
+    /// OS-level sandbox (bubblewrap, firejail, or sandbox-exec)
+    Bubblewrap,
+    /// Podman container with standard OCI runtime
+    Podman,
+    /// Podman container with gVisor (runsc) for syscall-level isolation
+    PodmanGvisor,
+}
+
+impl std::fmt::Display for RuntimeIsolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RuntimeIsolation::Auto => write!(f, "auto"),
+            RuntimeIsolation::Bubblewrap => write!(f, "bubblewrap"),
+            RuntimeIsolation::Podman => write!(f, "podman"),
+            RuntimeIsolation::PodmanGvisor => write!(f, "podman-gvisor"),
+        }
+    }
+}
+
+/// Resolved runtime after auto-detection.
+#[derive(Debug)]
+enum ResolvedRuntime {
+    /// OS-level sandbox (bwrap, firejail, sandbox-exec)
+    OsSandbox,
+    /// Standard Podman container
+    Podman,
+    /// Podman with gVisor (runsc) — path to runsc binary
+    PodmanGvisor(String),
+}
+
+/// Resolve the runtime isolation backend based on CLI flags and system availability.
+fn resolve_runtime(
+    isolation: Option<RuntimeIsolation>,
+    runtime_container_flag: bool,
+) -> Result<ResolvedRuntime> {
+    match isolation {
+        Some(RuntimeIsolation::Auto) => {
+            // Auto: prefer podman-gvisor > podman > OS sandbox
+            if container::detect_podman() {
+                if let Some(runsc) = container::detect_runsc() {
+                    eprintln!(
+                        "  {} gVisor runtime detected ({})",
+                        "✓".green(),
+                        runsc
+                    );
+                    return Ok(ResolvedRuntime::PodmanGvisor(runsc));
+                }
+                return Ok(ResolvedRuntime::Podman);
+            }
+            Ok(ResolvedRuntime::OsSandbox)
+        }
+        Some(RuntimeIsolation::Bubblewrap) => Ok(ResolvedRuntime::OsSandbox),
+        Some(RuntimeIsolation::Podman) => {
+            if !container::detect_podman() {
+                anyhow::bail!(
+                    "Podman not found. Install podman or use --runtime-isolation=auto"
+                );
+            }
+            Ok(ResolvedRuntime::Podman)
+        }
+        Some(RuntimeIsolation::PodmanGvisor) => {
+            if !container::detect_podman() {
+                anyhow::bail!(
+                    "Podman not found. Install podman or use --runtime-isolation=auto"
+                );
+            }
+            let runsc = container::detect_runsc().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "gVisor (runsc) not found. Install runsc or set SCURL_RUNSC_PATH.\n\
+                     See https://gvisor.dev/docs/user_guide/install/"
+                )
+            })?;
+            Ok(ResolvedRuntime::PodmanGvisor(runsc))
+        }
+        None => {
+            // No explicit --runtime-isolation: use legacy flag or default
+            if runtime_container_flag {
+                if !container::detect_podman() {
+                    anyhow::bail!(
+                        "Podman not found. Install podman for container-based execution, \
+                         or remove --runtime-container to use the default sandbox."
+                    );
+                }
+                // Opportunistically try gVisor when using legacy --runtime-container
+                if let Some(runsc) = container::detect_runsc() {
+                    eprintln!(
+                        "  {} gVisor runtime detected ({})",
+                        "✓".green(),
+                        runsc
+                    );
+                    return Ok(ResolvedRuntime::PodmanGvisor(runsc));
+                }
+                Ok(ResolvedRuntime::Podman)
+            } else {
+                Ok(ResolvedRuntime::OsSandbox)
+            }
         }
     }
 }
@@ -126,9 +236,18 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     no_proxy: bool,
 
-    /// Run script in a Podman container for runtime observation
+    /// Run script in a Podman container for runtime observation (deprecated: use --runtime-isolation)
     #[arg(long, global = true)]
     runtime_container: bool,
+
+    /// Runtime isolation backend: auto-detect, OS sandbox, Podman, or Podman+gVisor
+    ///
+    /// auto: prefer podman-gvisor > podman > bubblewrap (best available).
+    /// bubblewrap: OS-level sandbox only (bwrap, firejail, or sandbox-exec).
+    /// podman: Podman container with standard OCI runtime.
+    /// podman-gvisor: Podman with gVisor (runsc) for syscall-level isolation (requires runsc installed).
+    #[arg(long, value_enum, global = true)]
+    runtime_isolation: Option<RuntimeIsolation>,
 
     /// Timeout in seconds for container execution
     #[arg(long, default_value = "120", global = true)]
@@ -459,17 +578,34 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
     let mut runtime_verdict: Option<String> = None;
 
     if should_execute {
-        // Determine whether to use container mode
-        let use_container = cli.runtime_container
-            && matches!(
-                analysis.risk_level,
-                RiskLevel::Safe | RiskLevel::Low | RiskLevel::Medium
-            );
+        // Resolve runtime isolation backend
+        let resolved = resolve_runtime(cli.runtime_isolation, cli.runtime_container)?;
+
+        // Container mode requires acceptable risk unless explicitly forced
+        let container_forced = matches!(
+            cli.runtime_isolation,
+            Some(RuntimeIsolation::Podman) | Some(RuntimeIsolation::PodmanGvisor)
+        );
+        let risk_acceptable = matches!(
+            analysis.risk_level,
+            RiskLevel::Safe | RiskLevel::Low | RiskLevel::Medium
+        );
+        let use_container = match &resolved {
+            ResolvedRuntime::PodmanGvisor(_) | ResolvedRuntime::Podman => {
+                container_forced || risk_acceptable
+            }
+            ResolvedRuntime::OsSandbox => false,
+        };
 
         if use_container {
+            let (runtime_label, runsc_path) = match &resolved {
+                ResolvedRuntime::PodmanGvisor(p) => ("podman-gvisor", Some(p.as_str())),
+                ResolvedRuntime::Podman => ("podman", None),
+                ResolvedRuntime::OsSandbox => unreachable!(),
+            };
             println!(
                 "\n{}",
-                "Running in Podman container for observation...".cyan()
+                format!("Running in {} container for observation...", runtime_label).cyan()
             );
             let enable_monitor = !cli.no_monitor;
             match execute_in_container(
@@ -477,6 +613,7 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
                 cli.container_timeout,
                 &cli.monitor_level,
                 enable_monitor,
+                runsc_path,
             )
             .await
             {
@@ -568,9 +705,12 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
                 }
             }
         } else {
-            if cli.runtime_container {
+            if matches!(
+                resolved,
+                ResolvedRuntime::Podman | ResolvedRuntime::PodmanGvisor(_)
+            ) {
                 eprintln!(
-                    "{} Risk level {} too high for container mode; using standard sandbox.",
+                    "{} Risk level {} too high for auto container mode; using standard sandbox.",
                     "⚠".yellow(),
                     ai_risk_str
                 );

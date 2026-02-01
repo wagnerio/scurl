@@ -81,8 +81,9 @@ pub(crate) fn write_audit_log(
         // Append container observation fields if present
         if let Some(cr) = container_result {
             entry.push_str(&format!(
-                ",\"container_id\":\"{}\",\"runtime_duration_ms\":{},\"container_timed_out\":{},\"container_exit_code\":{},\"killed_by_monitor\":{},\"filesystem_changes\":{}",
+                ",\"container_id\":\"{}\",\"runtime_used\":\"{}\",\"runtime_duration_ms\":{},\"container_timed_out\":{},\"container_exit_code\":{},\"killed_by_monitor\":{},\"filesystem_changes\":{}",
                 cr.container_id.replace('"', "\\\""),
+                cr.runtime_used.replace('"', "\\\""),
                 cr.duration_ms,
                 cr.timed_out,
                 cr.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "null".to_string()),

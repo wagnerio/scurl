@@ -24,6 +24,8 @@ pub(crate) struct ContainerResult {
     pub(crate) filesystem_diff: Vec<String>,
     pub(crate) timed_out: bool,
     pub(crate) killed_by_monitor: bool,
+    /// Which runtime was used: "podman-gvisor", "podman"
+    pub(crate) runtime_used: String,
 }
 
 /// A security alert from Falco runtime monitoring.
@@ -74,6 +76,25 @@ pub(crate) fn falco_log_path() -> Option<String> {
         "/var/log/falco.log",
     ] {
         if Path::new(candidate).exists() {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+/// Detect gVisor's runsc binary. Checks SCURL_RUNSC_PATH env var first,
+/// then common installation paths. Returns the absolute path if found.
+pub(crate) fn detect_runsc() -> Option<String> {
+    // Environment override
+    if let Ok(path) = std::env::var("SCURL_RUNSC_PATH") {
+        let p = Path::new(&path);
+        if p.is_file() {
+            return Some(path);
+        }
+    }
+    // Common install locations
+    for candidate in &["/usr/local/bin/runsc", "/usr/bin/runsc"] {
+        if Path::new(candidate).is_file() {
             return Some(candidate.to_string());
         }
     }
@@ -236,14 +257,66 @@ pub(crate) async fn monitor_falco(
     let _ = child.kill().await;
 }
 
+/// Configure common Podman run arguments on an async command.
+/// When `runsc_path` is Some, adds `--runtime=<path>` for gVisor isolation.
+fn configure_podman_run(
+    cmd: &mut tokio::process::Command,
+    container_name: &str,
+    host_path: &str,
+    runsc_path: Option<&str>,
+) {
+    cmd.arg("run")
+        .arg("--name")
+        .arg(container_name);
+
+    if let Some(path) = runsc_path {
+        cmd.arg(format!("--runtime={}", path));
+    }
+
+    cmd.arg("--network=none")
+        .arg("--read-only")
+        .arg("--tmpfs")
+        .arg("/tmp:rw,noexec,nosuid,size=64m")
+        .arg("--cap-drop=ALL")
+        .arg("--security-opt=no-new-privileges")
+        .arg("--memory=256m")
+        .arg("--pids-limit=256")
+        .arg("-v")
+        .arg(format!("{}:/install.sh:ro", host_path))
+        .arg("docker.io/library/alpine:latest")
+        .arg("/bin/sh")
+        .arg("/install.sh");
+}
+
+/// Warn if running rootless Podman with gVisor (known compatibility issues).
+fn warn_rootless_gvisor() {
+    let is_root = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim() == "0")
+        .unwrap_or(false);
+
+    if !is_root {
+        eprintln!(
+            "  {} Rootless Podman + gVisor may have issues (cgroups, network namespaces).\n    \
+             Consider running with sudo for reliable gVisor isolation.\n    \
+             See: https://github.com/google/gvisor/issues/311",
+            "⚠".yellow()
+        );
+    }
+}
+
 /// Execute a script in a Podman container with optional Falco monitoring.
-/// Returns the container result, any Falco alerts collected, and whether
-/// the container was killed by the monitor.
+/// When `runsc_path` is Some, uses gVisor (runsc) as the OCI runtime.
+/// Returns the container result and any Falco alerts collected.
 pub(crate) async fn execute_in_container(
     script: &str,
     timeout_secs: u64,
     monitor_level: &MonitorLevel,
     enable_monitor: bool,
+    runsc_path: Option<&str>,
 ) -> Result<(ContainerResult, Vec<FalcoAlert>)> {
     use tokio::process::Command as AsyncCommand;
 
@@ -252,6 +325,10 @@ pub(crate) async fn execute_in_container(
             "Podman not found. Install podman for container-based execution, \
              or remove --runtime-container to use the default sandbox."
         );
+    }
+
+    if runsc_path.is_some() {
+        warn_rootless_gvisor();
     }
 
     let start = std::time::Instant::now();
@@ -297,23 +374,9 @@ pub(crate) async fn execute_in_container(
     let (timed_out, killed_by_monitor, stdout, stderr, exit_code, alerts) = if falco_available {
         use tokio::io::AsyncReadExt;
 
-        let mut child = AsyncCommand::new("podman")
-            .arg("run")
-            .arg("--name")
-            .arg(&container_name)
-            .arg("--network=none")
-            .arg("--read-only")
-            .arg("--tmpfs")
-            .arg("/tmp:rw,noexec,nosuid,size=64m")
-            .arg("--cap-drop=ALL")
-            .arg("--security-opt=no-new-privileges")
-            .arg("--memory=256m")
-            .arg("--pids-limit=256")
-            .arg("-v")
-            .arg(format!("{}:/install.sh:ro", host_path))
-            .arg("docker.io/library/alpine:latest")
-            .arg("/bin/sh")
-            .arg("/install.sh")
+        let mut child_cmd = AsyncCommand::new("podman");
+        configure_podman_run(&mut child_cmd, &container_name, host_path, runsc_path);
+        let mut child = child_cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()?;
@@ -425,27 +488,12 @@ pub(crate) async fn execute_in_container(
 
         (timed, sniped, so, se, code, collected)
     } else {
-        // ── Unmonitored path (simple output, same as Day 1) ──────────────
+        // ── Unmonitored path (simple output) ────────────────────────────
+        let mut run_cmd = AsyncCommand::new("podman");
+        configure_podman_run(&mut run_cmd, &container_name, host_path, runsc_path);
         let run_result = tokio::time::timeout(
             Duration::from_secs(timeout_secs),
-            AsyncCommand::new("podman")
-                .arg("run")
-                .arg("--name")
-                .arg(&container_name)
-                .arg("--network=none")
-                .arg("--read-only")
-                .arg("--tmpfs")
-                .arg("/tmp:rw,noexec,nosuid,size=64m")
-                .arg("--cap-drop=ALL")
-                .arg("--security-opt=no-new-privileges")
-                .arg("--memory=256m")
-                .arg("--pids-limit=256")
-                .arg("-v")
-                .arg(format!("{}:/install.sh:ro", host_path))
-                .arg("docker.io/library/alpine:latest")
-                .arg("/bin/sh")
-                .arg("/install.sh")
-                .output(),
+            run_cmd.output(),
         )
         .await;
 
@@ -530,6 +578,12 @@ pub(crate) async fn execute_in_container(
     // Cleanup
     cleanup_container(&container_name).await;
 
+    let runtime_used = if runsc_path.is_some() {
+        "podman-gvisor".to_string()
+    } else {
+        "podman".to_string()
+    };
+
     let result = ContainerResult {
         container_id,
         exit_code,
@@ -539,6 +593,7 @@ pub(crate) async fn execute_in_container(
         filesystem_diff,
         timed_out,
         killed_by_monitor,
+        runtime_used,
     };
 
     Ok((result, alerts))
@@ -557,6 +612,7 @@ pub(crate) fn display_container_result(result: &ContainerResult, alerts: &[Falco
     println!("{}", "─".repeat(50));
 
     println!("{} {}", "Container ID:".bold(), result.container_id);
+    println!("{} {}", "Runtime:".bold(), result.runtime_used);
     println!("{} {}ms", "Duration:".bold(), result.duration_ms);
 
     if result.killed_by_monitor {
@@ -668,6 +724,7 @@ mod tests {
             ],
             timed_out,
             killed_by_monitor,
+            runtime_used: "podman".to_string(),
         }
     }
 
@@ -726,6 +783,7 @@ mod tests {
                 10,
                 &MonitorLevel::Medium,
                 false,
+                None,
             )
             .await;
             assert!(result.is_err());
@@ -956,5 +1014,37 @@ mod tests {
                 let _ = should_kill_container(&severity, &level);
             }
         }
+    }
+
+    // ── gVisor / runsc detection tests ──
+
+    #[test]
+    fn test_detect_runsc_returns_option() {
+        // Just verify it doesn't panic; actual result depends on system
+        let _result = detect_runsc();
+    }
+
+    #[test]
+    fn test_detect_runsc_respects_env() {
+        // With a nonexistent path in env, should return None
+        std::env::set_var("SCURL_RUNSC_PATH", "/nonexistent/runsc");
+        let result = detect_runsc();
+        assert!(result.is_none());
+        std::env::remove_var("SCURL_RUNSC_PATH");
+    }
+
+    #[test]
+    fn test_container_result_runtime_used_field() {
+        let result = make_container_result(false, false);
+        assert_eq!(result.runtime_used, "podman");
+    }
+
+    #[test]
+    fn test_display_container_result_shows_runtime() {
+        let mut result = make_container_result(false, false);
+        result.runtime_used = "podman-gvisor".to_string();
+        // Should not panic; verify runtime field is present
+        display_container_result(&result, &[]);
+        assert_eq!(result.runtime_used, "podman-gvisor");
     }
 }

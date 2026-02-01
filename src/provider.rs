@@ -852,6 +852,7 @@ mod tests {
             filesystem_diff: vec!["/tmp/test".to_string()],
             timed_out: false,
             killed_by_monitor: false,
+            runtime_used: "podman".to_string(),
         };
         let prompt = build_runtime_prompt(
             "echo hello",
@@ -878,6 +879,7 @@ mod tests {
             filesystem_diff: Vec::new(),
             timed_out: false,
             killed_by_monitor: true,
+            runtime_used: "podman-gvisor".to_string(),
         };
         let alerts = vec![FalcoAlert {
             timestamp: "2026-01-01T00:00:00Z".to_string(),
