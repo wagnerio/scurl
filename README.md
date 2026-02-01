@@ -40,9 +40,9 @@ Choose your AI provider, enter credentials (or skip for Ollama), done. Config is
 
 | Provider | Default Model | API Key |
 |----------|---------------|---------|
-| **Anthropic** | claude-sonnet-4-5 | [console.anthropic.com](https://console.anthropic.com) |
-| **xAI** | grok-2-latest | [console.x.ai](https://console.x.ai) |
-| **OpenAI** | gpt-4o | [platform.openai.com](https://platform.openai.com/api-keys) |
+| **Anthropic** | claude-haiku-4-5 | [console.anthropic.com](https://console.anthropic.com) |
+| **xAI** | grok-4-1-fast-reasoning | [console.x.ai](https://console.x.ai) |
+| **OpenAI** | gpt-5-nano | [platform.openai.com](https://platform.openai.com/api-keys) |
 | **Ollama** | llama3.2 | None required ([ollama.ai](https://ollama.ai)) |
 
 ## Usage
