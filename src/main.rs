@@ -257,9 +257,9 @@ impl Provider {
 
     fn default_model(&self) -> &str {
         match self {
-            Provider::Anthropic => "claude-sonnet-4-5-20250929",
-            Provider::XAI => "grok-2-latest",
-            Provider::OpenAI => "gpt-4o",
+            Provider::Anthropic => "claude-haiku-4-5",
+            Provider::XAI => "grok-4-1-fast-reasoning",
+            Provider::OpenAI => "gpt-5-nano",
             Provider::Ollama => "llama3.2",
         }
     }
@@ -879,11 +879,11 @@ async fn login_command(cli: &Cli) -> Result<()> {
     // Select provider
     println!("{}", "Available providers:".bold());
     println!(
-        "  1. {} (Claude Sonnet 4.5, Haiku, Opus)",
+        "  1. {} (Claude Haiku 4.5, Sonnet, Opus)",
         "Anthropic".cyan()
     );
-    println!("  2. {} (Grok 2)", "xAI".cyan());
-    println!("  3. {} (GPT-4, GPT-4o)", "OpenAI".cyan());
+    println!("  2. {} (Grok 4)", "xAI".cyan());
+    println!("  3. {} (GPT-5)", "OpenAI".cyan());
     println!("  4. {} (Local models via Ollama)", "Ollama".cyan());
 
     let choice = prompt("\nSelect provider [1-4]: ")?;
@@ -1249,10 +1249,10 @@ RECOMMENDATION: Some recommendation
         assert!(anthropic.default_model().contains("claude"));
 
         let xai = Provider::XAI;
-        assert_eq!(xai.default_model(), "grok-2-latest");
+        assert_eq!(xai.default_model(), "grok-4-1-fast-reasoning");
 
         let openai = Provider::OpenAI;
-        assert_eq!(openai.default_model(), "gpt-4o");
+        assert_eq!(openai.default_model(), "gpt-5-nano");
 
         let ollama = Provider::Ollama;
         assert_eq!(ollama.default_model(), "llama3.2");
