@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.5.0] - 2026-02-01
+
+### Added
+- **Container-based runtime execution** — execute scripts inside a rootless Podman container with no network, read-only root, and seccomp defaults (`--runtime-container`)
+- **Falco runtime monitoring** — real-time syscall monitoring during container execution via Falco log tailing, with alert classification (Critical / Suspicious / Anomaly) (`--monitor-level`, `--no-monitor`)
+- **Local script cache** — SHA-256-indexed JSON cache at `~/.scurl/cache.json` with trusted/blacklisted status and automatic re-analysis on script change (`--auto-trust`)
+- **Hash blacklisting** — revoke trust for known-bad script hashes from the CLI (`--blacklist-hash`)
+- **Source whitelisting** — `whitelist_sources` in `config.toml` for domains that skip the interactive prompt
+- **Enhanced AI prompt engineering** — 10-category threat taxonomy, anti-evasion directives, few-shot examples
+- **Confidence scores** — AI analysis now reports a 0–100 confidence percentage with color-coded display
+- **Second-opinion mode** — cross-validate analysis using a second AI provider with agreement/disagreement reporting (`--second-opinion`, `--second-provider`)
+- **Custom prompt overrides** — load user-defined prompt templates from `~/.scurl/prompts/` with template variable substitution
+- **AI response sanitization** — strips ANSI escape sequences and control characters from AI responses before parsing
+- **Audit log rotation** — rotates `~/.scurl/audit.log` at 10 MB to `.log.1`
+
+### Changed
+- URL validation hardened: 8 KB length cap, embedded credential rejection, expanded SSRF detection (IPv6, 172.16–31.x.x, fd/fe80 ranges)
+- Blacklist hash input validated (hex-only, normalized to lowercase)
+- Cache handles empty files and corrupted JSON (auto-backup to `.json.bak`)
+- Prompt override loader rejects path traversal and files over 100 KB
+- ScriptCache forward-compatible with `#[serde(default)]` on entries
+
+### Security
+- Container execution uses `--cap-drop ALL`, `--security-opt no-new-privileges`, `--read-only`, `--network none`
+- Falco alerts trigger automatic execution abort on Critical severity
+- Prompt override paths cannot escape `~/.scurl/prompts/`
+
 ## [0.4.1] - 2026-02-01
 
 ### Added
