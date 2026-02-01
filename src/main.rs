@@ -33,9 +33,6 @@ struct Config {
     /// URL prefixes considered trusted (skip AI review if hash cached as safe)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     whitelist_sources: Vec<String>,
-    /// Reputation server URL (default: https://api.scurl.dev)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    reputation_url: Option<String>,
 }
 
 impl Config {
@@ -269,14 +266,6 @@ struct Cli {
     #[arg(long, global = true, value_name = "HASH")]
     blacklist_hash: Option<String>,
 
-    /// Disable global reputation lookups
-    #[arg(long, global = true)]
-    no_reputation: bool,
-
-    /// Submit local verdict to the global reputation server after analysis
-    #[arg(long, global = true)]
-    submit_findings: bool,
-
     /// Run a second AI provider for cross-validation
     #[arg(long, global = true)]
     second_opinion: bool,
@@ -480,7 +469,6 @@ fn load_prompt_override(name: &str) -> Option<String> {
 fn build_analysis_prompt(
     script: &str,
     static_findings: Option<&str>,
-    reputation_context: Option<&str>,
 ) -> String {
     let escaped_script = script.replace("```", "\\`\\`\\`");
 
@@ -547,13 +535,6 @@ RECOMMENDATION: This script installs a well-known CLI tool via its official rele
         prompt.push_str(&format!(
             "\n\n## Static Analysis Results\n\nAutomated static analysis detected these patterns — factor them into your assessment:\n{}",
             findings
-        ));
-    }
-
-    if let Some(rep) = reputation_context {
-        prompt.push_str(&format!(
-            "\n\n## Global Reputation Data\n\nCommunity reputation for this script hash:\n{}",
-            rep
         ));
     }
 
@@ -766,7 +747,6 @@ impl Provider {
         }))
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn analyze(
         &self,
         script: &str,
@@ -775,13 +755,12 @@ impl Provider {
         net_config: &NetworkConfig,
         static_findings: Option<&str>,
         config: &Config,
-        reputation_context: Option<&str>,
     ) -> Result<String> {
         // Check for user-supplied prompt override
         let custom_prompt = load_prompt_override("analyze");
 
         let prompt = if let Some(template) = custom_prompt {
-            // User-supplied template: substitute {{SCRIPT}}, {{STATIC_FINDINGS}}, {{REPUTATION}}
+            // User-supplied template: substitute {{SCRIPT}}, {{STATIC_FINDINGS}}
             let escaped = script.replace("```", "\\`\\`\\`");
             template
                 .replace("{{SCRIPT}}", &escaped)
@@ -789,12 +768,8 @@ impl Provider {
                     "{{STATIC_FINDINGS}}",
                     static_findings.unwrap_or("(none)"),
                 )
-                .replace(
-                    "{{REPUTATION}}",
-                    reputation_context.unwrap_or("(no data)"),
-                )
         } else {
-            build_analysis_prompt(script, static_findings, reputation_context)
+            build_analysis_prompt(script, static_findings)
         };
 
         self.send_prompt(&prompt, api_key, model, net_config, config)
@@ -2082,7 +2057,6 @@ async fn analyze_script(
     config: &Config,
     net_config: &NetworkConfig,
     static_findings: Option<&str>,
-    reputation_context: Option<&str>,
 ) -> Result<(SecurityAnalysis, String)> {
     let provider: Provider = config.provider.parse()?;
     let spinner = new_spinner(&format!("Analyzing script with {} AI...", provider.name()));
@@ -2096,7 +2070,6 @@ async fn analyze_script(
             net_config,
             static_findings,
             config,
-            reputation_context,
         )
         .await?;
 
@@ -2112,7 +2085,6 @@ async fn second_opinion_analysis(
     config: &Config,
     net_config: &NetworkConfig,
     static_findings: Option<&str>,
-    reputation_context: Option<&str>,
     second_provider_name: &str,
 ) -> Result<(SecurityAnalysis, String)> {
     let provider: Provider = second_provider_name.parse()?;
@@ -2132,7 +2104,6 @@ async fn second_opinion_analysis(
             net_config,
             static_findings,
             config,
-            reputation_context,
         )
         .await?;
 
@@ -2398,159 +2369,6 @@ fn url_matches_whitelist(url: &str, whitelist: &[String]) -> bool {
     whitelist.iter().any(|prefix| url.starts_with(prefix))
 }
 
-// ============================================================================
-// Global Reputation
-// ============================================================================
-
-const DEFAULT_REPUTATION_URL: &str = "https://api.scurl.dev";
-
-/// Community reputation record returned from the reputation server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ReputationRecord {
-    sha256: String,
-    /// Community consensus verdict (SAFE / LOW / MEDIUM / HIGH / CRITICAL / UNKNOWN)
-    verdict: String,
-    /// Number of unique reports for this hash
-    report_count: u64,
-    /// First time this hash was reported (ISO-8601)
-    first_seen: String,
-    /// Last time this hash was reported (ISO-8601)
-    last_seen: String,
-    /// URL domains that have served this hash
-    #[serde(default)]
-    known_sources: Vec<String>,
-    /// Whether the hash has been globally flagged/revoked
-    #[serde(default)]
-    flagged: bool,
-}
-
-/// Payload submitted to the reputation server after analysis.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ReputationSubmission {
-    sha256: String,
-    verdict: String,
-    source_url: String,
-    static_findings: usize,
-    has_critical: bool,
-    runtime_passed: Option<bool>,
-    runtime_verdict: Option<String>,
-    client_version: String,
-}
-
-/// Resolve the reputation server base URL from config, env, or default.
-fn reputation_base_url(config: &Config) -> String {
-    if let Some(ref url) = config.reputation_url {
-        return url.trim_end_matches('/').to_string();
-    }
-    if let Ok(url) = std::env::var("SCURL_REPUTATION_URL") {
-        return url.trim_end_matches('/').to_string();
-    }
-    DEFAULT_REPUTATION_URL.to_string()
-}
-
-/// Query global reputation for a script hash.
-/// Returns None on network errors or 404 (hash unknown).
-async fn query_reputation(
-    sha256: &str,
-    net_config: &NetworkConfig,
-    config: &Config,
-) -> Option<ReputationRecord> {
-    let base = reputation_base_url(config);
-    let url = format!("{}/v1/hash/{}", base, sha256);
-
-    let resp = net_config
-        .api_client
-        .get(&url)
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .ok()?;
-
-    if !resp.status().is_success() {
-        return None;
-    }
-
-    let body = resp.text().await.ok()?;
-    if body.len() > MAX_AI_RESPONSE_BYTES {
-        return None;
-    }
-
-    serde_json::from_str(&body).ok()
-}
-
-/// Submit a local verdict to the global reputation server.
-async fn submit_reputation(
-    submission: &ReputationSubmission,
-    net_config: &NetworkConfig,
-    config: &Config,
-) -> Result<()> {
-    let base = reputation_base_url(config);
-    let url = format!("{}/v1/hash", base);
-
-    let resp = net_config
-        .api_client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(submission)
-        .send()
-        .await
-        .context("Failed to submit reputation")?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("Reputation server returned {}: {}", status, body);
-    }
-    Ok(())
-}
-
-/// Display reputation data to the user.
-fn display_reputation(record: &ReputationRecord) {
-    println!(
-        "\n{} {}",
-        "Global Reputation".bold().underline(),
-        format!("({} reports)", record.report_count).bright_black()
-    );
-
-    let verdict_color = match record.verdict.to_uppercase().as_str() {
-        "SAFE" => "green",
-        "LOW" => "green",
-        "MEDIUM" => "yellow",
-        "HIGH" => "red",
-        "CRITICAL" => "red",
-        _ => "white",
-    };
-    println!(
-        "  {} {}",
-        "Community verdict:".bold(),
-        record.verdict.to_uppercase().color(verdict_color).bold()
-    );
-
-    if !record.first_seen.is_empty() {
-        println!(
-            "  {} {} — {}",
-            "Seen:".bold(),
-            record.first_seen.bright_black(),
-            record.last_seen.bright_black()
-        );
-    }
-
-    if !record.known_sources.is_empty() {
-        println!(
-            "  {} {}",
-            "Known sources:".bold(),
-            record.known_sources.join(", ").bright_black()
-        );
-    }
-
-    if record.flagged {
-        println!(
-            "  {} {}",
-            "⚠".yellow(),
-            "This hash has been globally flagged as malicious!".red().bold()
-        );
-    }
-}
 
 // ============================================================================
 // Container Runner (Podman)
@@ -3611,7 +3429,6 @@ async fn login_command(cli: &Cli) -> Result<()> {
         azure_endpoint: azure_endpoint.clone(),
         azure_deployment: azure_deployment.clone(),
         whitelist_sources: Vec::new(),
-        reputation_url: None,
     };
 
     let test_script = "#!/bin/bash\necho 'Hello, World!'";
@@ -3623,7 +3440,6 @@ async fn login_command(cli: &Cli) -> Result<()> {
             &net_config,
             None,
             &test_config,
-            None,
         )
         .await
     {
@@ -3660,8 +3476,6 @@ async fn login_command(cli: &Cli) -> Result<()> {
         .as_ref()
         .map(|c| c.whitelist_sources.clone())
         .unwrap_or_default();
-    let existing_reputation_url = existing_config.and_then(|c| c.reputation_url);
-
     let config = Config {
         provider: provider_name.to_string(),
         api_key: config_api_key,
@@ -3669,7 +3483,6 @@ async fn login_command(cli: &Cli) -> Result<()> {
         azure_endpoint,
         azure_deployment,
         whitelist_sources: existing_whitelist,
-        reputation_url: existing_reputation_url,
     };
 
     config.save()?;
@@ -3797,8 +3610,6 @@ Pass through any flags the user requests:
 | `--no-monitor` | Disable Falco runtime monitoring |
 | `--auto-trust` | Cache and auto-trust safe scripts |
 | `--blacklist-hash <hex>` | Blacklist a script hash |
-| `--no-reputation` | Skip global reputation lookup |
-| `--submit-findings` | Submit analysis to reputation server |
 | `--second-opinion` | Cross-validate with a second AI provider |
 | `--second-provider <name>` | Provider for second opinion |
 | `--no-sandbox` | Disable OS-level sandbox |
@@ -3829,7 +3640,6 @@ fn write_audit_log(
     container_result: Option<&ContainerResult>,
     falco_alerts: &[FalcoAlert],
     runtime_ai_verdict: Option<&str>,
-    reputation_verdict: Option<&str>,
 ) {
     let log_result = (|| -> Result<()> {
         let dir = Config::config_dir()?;
@@ -3938,14 +3748,6 @@ fn write_audit_log(
             ));
         }
 
-        // Append global reputation verdict if available
-        if let Some(rep_verdict) = reputation_verdict {
-            entry.push_str(&format!(
-                ",\"reputation_verdict\":\"{}\"",
-                rep_verdict.replace('"', "\\\"")
-            ));
-        }
-
         entry.push_str("}\n");
 
         use std::fs::OpenOptions;
@@ -4009,7 +3811,6 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
                     azure_endpoint: std::env::var("AZURE_OPENAI_ENDPOINT").ok(),
                     azure_deployment: std::env::var("AZURE_OPENAI_DEPLOYMENT").ok(),
                     whitelist_sources: Vec::new(),
-                    reputation_url: None,
                 }
             }
         }
@@ -4089,7 +3890,6 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
             None,
             &[],
             None,
-            None,
         );
         return Ok(());
     }
@@ -4117,56 +3917,8 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
             None,
             &[],
             None,
-            None,
         );
         return Ok(());
-    }
-
-    // ── Global reputation lookup ──
-    let mut reputation: Option<ReputationRecord> = None;
-    if !cli.no_reputation {
-        match query_reputation(&script_hash, &net_config, &config).await {
-            Some(record) => {
-                display_reputation(&record);
-
-                // Hard-block if globally flagged
-                if record.flagged {
-                    println!(
-                        "\n{} Globally flagged hash — blocking execution.",
-                        "⛔".red()
-                    );
-                    // Also blacklist locally
-                    script_cache.blacklist(&script_hash);
-                    let _ = script_cache.save();
-                    write_audit_log(
-                        url,
-                        &script_hash,
-                        script.len(),
-                        0,
-                        false,
-                        false,
-                        "FLAGGED",
-                        "",
-                        "blocked-reputation",
-                        false,
-                        None,
-                        &[],
-                        None,
-                        Some("FLAGGED"),
-                    );
-                    return Ok(());
-                }
-
-                reputation = Some(record);
-            }
-            None => {
-                println!(
-                    "\n{} {}",
-                    "ℹ".bright_black(),
-                    "No global reputation data for this hash.".bright_black()
-                );
-            }
-        }
     }
 
     // Run static analysis
@@ -4175,21 +3927,6 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
 
     // Disable auto-execute if critical findings
     let mut force_no_auto = static_report.has_critical;
-
-    // Also inhibit auto-execute if reputation is HIGH/CRITICAL
-    if let Some(ref rep) = reputation {
-        if matches!(
-            rep.verdict.to_uppercase().as_str(),
-            "HIGH" | "CRITICAL"
-        ) {
-            force_no_auto = true;
-            println!(
-                "{} Auto-execute inhibited: global reputation is {}.",
-                "⚠".yellow(),
-                rep.verdict.to_uppercase().red()
-            );
-        }
-    }
 
     // Format static findings for AI
     let static_findings_text = if !static_report.findings.is_empty() {
@@ -4209,31 +3946,12 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
         None
     };
 
-    // Build reputation context string for AI prompt
-    let reputation_context_text = reputation.as_ref().map(|r| {
-        let mut ctx = format!(
-            "Community verdict: {} ({} reports, first seen {})",
-            r.verdict, r.report_count, r.first_seen
-        );
-        if !r.known_sources.is_empty() {
-            ctx.push_str(&format!(
-                "\nKnown sources: {}",
-                r.known_sources.join(", ")
-            ));
-        }
-        if r.flagged {
-            ctx.push_str("\nWARNING: This hash is globally flagged as malicious.");
-        }
-        ctx
-    });
-
     // Perform AI security analysis
     let (analysis, ai_raw_response) = analyze_script(
         &script,
         &config,
         &net_config,
         static_findings_text.as_deref(),
-        reputation_context_text.as_deref(),
     )
     .await?;
 
@@ -4258,7 +3976,6 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
             &config,
             &net_config,
             static_findings_text.as_deref(),
-            reputation_context_text.as_deref(),
             second_provider_name,
         )
         .await
@@ -4542,7 +4259,6 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
     }
 
     // Write audit log (after execution so container + Falco results are available)
-    let rep_verdict_str = reputation.as_ref().map(|r| r.verdict.clone());
     write_audit_log(
         url,
         &script_hash,
@@ -4557,42 +4273,7 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
         container_result.as_ref(),
         &falco_alerts,
         runtime_verdict.as_deref(),
-        rep_verdict_str.as_deref(),
     );
-
-    // ── Submit findings to global reputation server ──
-    if cli.submit_findings && !cli.no_reputation {
-        let runtime_passed = container_result
-            .as_ref()
-            .map(|r| !r.timed_out && !r.killed_by_monitor);
-
-        let submission = ReputationSubmission {
-            sha256: script_hash.clone(),
-            verdict: ai_risk_str.clone(),
-            source_url: url.to_string(),
-            static_findings: static_report.findings.len(),
-            has_critical: static_report.has_critical,
-            runtime_passed,
-            runtime_verdict: runtime_verdict.clone(),
-            client_version: env!("CARGO_PKG_VERSION").to_string(),
-        };
-
-        match submit_reputation(&submission, &net_config, &config).await {
-            Ok(()) => {
-                println!(
-                    "\n{} Verdict submitted to global reputation server.",
-                    "✓".green()
-                );
-            }
-            Err(e) => {
-                eprintln!(
-                    "{} Failed to submit reputation: {}",
-                    "⚠".yellow(),
-                    e
-                );
-            }
-        }
-    }
 
     Ok(())
 }
@@ -5682,193 +5363,6 @@ RECOMMENDATION: Looks good.
         assert_eq!(&ts[16..17], ":");
     }
 
-    // ── Reputation tests ──
-
-    #[test]
-    fn test_reputation_record_deserialize() {
-        let json = r#"{
-            "sha256": "abc123",
-            "verdict": "SAFE",
-            "report_count": 42,
-            "first_seen": "2026-01-01T00:00:00Z",
-            "last_seen": "2026-01-30T12:00:00Z",
-            "known_sources": ["github.com", "get.docker.com"],
-            "flagged": false
-        }"#;
-        let record: ReputationRecord = serde_json::from_str(json).unwrap();
-        assert_eq!(record.sha256, "abc123");
-        assert_eq!(record.verdict, "SAFE");
-        assert_eq!(record.report_count, 42);
-        assert_eq!(record.known_sources.len(), 2);
-        assert!(!record.flagged);
-    }
-
-    #[test]
-    fn test_reputation_record_deserialize_minimal() {
-        // known_sources and flagged should default if missing
-        let json = r#"{
-            "sha256": "def456",
-            "verdict": "HIGH",
-            "report_count": 3,
-            "first_seen": "2026-01-15T00:00:00Z",
-            "last_seen": "2026-01-20T00:00:00Z"
-        }"#;
-        let record: ReputationRecord = serde_json::from_str(json).unwrap();
-        assert_eq!(record.verdict, "HIGH");
-        assert!(record.known_sources.is_empty());
-        assert!(!record.flagged);
-    }
-
-    #[test]
-    fn test_reputation_record_flagged() {
-        let json = r#"{
-            "sha256": "evil789",
-            "verdict": "CRITICAL",
-            "report_count": 100,
-            "first_seen": "2025-12-01T00:00:00Z",
-            "last_seen": "2026-01-30T00:00:00Z",
-            "known_sources": ["evil.com"],
-            "flagged": true
-        }"#;
-        let record: ReputationRecord = serde_json::from_str(json).unwrap();
-        assert!(record.flagged);
-        assert_eq!(record.verdict, "CRITICAL");
-    }
-
-    #[test]
-    fn test_reputation_submission_serialize() {
-        let submission = ReputationSubmission {
-            sha256: "abc123".to_string(),
-            verdict: "SAFE".to_string(),
-            source_url: "https://example.com/install.sh".to_string(),
-            static_findings: 2,
-            has_critical: false,
-            runtime_passed: Some(true),
-            runtime_verdict: None,
-            client_version: "0.4.1".to_string(),
-        };
-        let json = serde_json::to_string(&submission).unwrap();
-        assert!(json.contains("\"sha256\":\"abc123\""));
-        assert!(json.contains("\"verdict\":\"SAFE\""));
-        assert!(json.contains("\"static_findings\":2"));
-        assert!(json.contains("\"runtime_passed\":true"));
-        assert!(json.contains("\"client_version\":\"0.4.1\""));
-    }
-
-    #[test]
-    fn test_reputation_submission_with_runtime_verdict() {
-        let submission = ReputationSubmission {
-            sha256: "abc123".to_string(),
-            verdict: "LOW".to_string(),
-            source_url: "https://example.com".to_string(),
-            static_findings: 0,
-            has_critical: false,
-            runtime_passed: Some(false),
-            runtime_verdict: Some("CRITICAL".to_string()),
-            client_version: "0.4.1".to_string(),
-        };
-        let json = serde_json::to_string(&submission).unwrap();
-        assert!(json.contains("\"runtime_verdict\":\"CRITICAL\""));
-        assert!(json.contains("\"runtime_passed\":false"));
-    }
-
-    #[test]
-    fn test_reputation_base_url_default() {
-        let config = Config {
-            provider: "anthropic".to_string(),
-            api_key: "test".to_string(),
-            model: None,
-            azure_endpoint: None,
-            azure_deployment: None,
-            whitelist_sources: Vec::new(),
-            reputation_url: None,
-        };
-        assert_eq!(
-            reputation_base_url(&config),
-            "https://api.scurl.dev"
-        );
-    }
-
-    #[test]
-    fn test_reputation_base_url_from_config() {
-        let config = Config {
-            provider: "anthropic".to_string(),
-            api_key: "test".to_string(),
-            model: None,
-            azure_endpoint: None,
-            azure_deployment: None,
-            whitelist_sources: Vec::new(),
-            reputation_url: Some("https://custom-rep.example.com/".to_string()),
-        };
-        // Should strip trailing slash
-        assert_eq!(
-            reputation_base_url(&config),
-            "https://custom-rep.example.com"
-        );
-    }
-
-    #[test]
-    fn test_display_reputation_no_panic() {
-        let record = ReputationRecord {
-            sha256: "abc123".to_string(),
-            verdict: "SAFE".to_string(),
-            report_count: 10,
-            first_seen: "2026-01-01T00:00:00Z".to_string(),
-            last_seen: "2026-01-30T00:00:00Z".to_string(),
-            known_sources: vec!["github.com".to_string()],
-            flagged: false,
-        };
-        // Should not panic
-        display_reputation(&record);
-    }
-
-    #[test]
-    fn test_display_reputation_flagged_no_panic() {
-        let record = ReputationRecord {
-            sha256: "evil789".to_string(),
-            verdict: "CRITICAL".to_string(),
-            report_count: 100,
-            first_seen: "2025-12-01T00:00:00Z".to_string(),
-            last_seen: "2026-01-30T00:00:00Z".to_string(),
-            known_sources: vec!["evil.com".to_string()],
-            flagged: true,
-        };
-        display_reputation(&record);
-    }
-
-    #[test]
-    fn test_display_reputation_empty_sources_no_panic() {
-        let record = ReputationRecord {
-            sha256: "abc123".to_string(),
-            verdict: "MEDIUM".to_string(),
-            report_count: 1,
-            first_seen: "2026-01-30T00:00:00Z".to_string(),
-            last_seen: "2026-01-30T00:00:00Z".to_string(),
-            known_sources: Vec::new(),
-            flagged: false,
-        };
-        display_reputation(&record);
-    }
-
-    #[test]
-    fn test_reputation_record_roundtrip() {
-        let record = ReputationRecord {
-            sha256: "abc123".to_string(),
-            verdict: "LOW".to_string(),
-            report_count: 5,
-            first_seen: "2026-01-01T00:00:00Z".to_string(),
-            last_seen: "2026-01-15T00:00:00Z".to_string(),
-            known_sources: vec!["github.com".to_string(), "raw.githubusercontent.com".to_string()],
-            flagged: false,
-        };
-        let json = serde_json::to_string(&record).unwrap();
-        let loaded: ReputationRecord = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.sha256, record.sha256);
-        assert_eq!(loaded.verdict, record.verdict);
-        assert_eq!(loaded.report_count, record.report_count);
-        assert_eq!(loaded.known_sources.len(), 2);
-    }
-
     // ── Prompt engineering & confidence tests ──
 
     #[test]
@@ -5944,7 +5438,6 @@ RECOMMENDATION: Safe.
         let prompt = build_analysis_prompt(
             "#!/bin/bash\necho hello",
             None,
-            None,
         );
         assert!(prompt.contains("Threat Taxonomy"));
         assert!(prompt.contains("Supply Chain"));
@@ -5961,27 +5454,15 @@ RECOMMENDATION: Safe.
         let prompt = build_analysis_prompt(
             "#!/bin/bash\ncurl | bash",
             Some("\n- [SHELL] [HIGH] SHELL-PIPE-EXEC: Curl piped to shell (line 2)"),
-            None,
         );
         assert!(prompt.contains("Static Analysis Results"));
         assert!(prompt.contains("SHELL-PIPE-EXEC"));
     }
 
     #[test]
-    fn test_build_analysis_prompt_includes_reputation() {
-        let prompt = build_analysis_prompt(
-            "#!/bin/bash\necho hello",
-            None,
-            Some("Community verdict: SAFE (42 reports, first seen 2026-01-01)"),
-        );
-        assert!(prompt.contains("Global Reputation Data"));
-        assert!(prompt.contains("42 reports"));
-    }
-
-    #[test]
     fn test_build_analysis_prompt_escapes_backticks() {
         let script = "#!/bin/bash\necho ```hello```";
-        let prompt = build_analysis_prompt(script, None, None);
+        let prompt = build_analysis_prompt(script, None);
         // Should not contain raw triple backticks in the script section
         assert!(!prompt.contains("echo ```hello```"));
         assert!(prompt.contains("echo \\`\\`\\`hello\\`\\`\\`"));
@@ -6384,7 +5865,6 @@ api_key = "sk-test"
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.provider, "anthropic");
         assert!(config.whitelist_sources.is_empty());
-        assert!(config.reputation_url.is_none());
     }
 
     #[test]
@@ -6396,15 +5876,10 @@ model = "gpt-4"
 azure_endpoint = "https://myresource.openai.azure.com"
 azure_deployment = "my-deployment"
 whitelist_sources = ["https://github.com/", "https://get.docker.com"]
-reputation_url = "https://custom-rep.example.com"
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.provider, "openai");
         assert_eq!(config.whitelist_sources.len(), 2);
-        assert_eq!(
-            config.reputation_url.as_deref(),
-            Some("https://custom-rep.example.com")
-        );
     }
 
     #[test]

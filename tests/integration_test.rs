@@ -70,17 +70,6 @@ fn test_help_includes_day3_flags() {
 }
 
 #[test]
-fn test_help_includes_day4_flags() {
-    Command::cargo_bin("scurl")
-        .unwrap()
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--no-reputation"))
-        .stdout(predicate::str::contains("--submit-findings"));
-}
-
-#[test]
 fn test_help_includes_day5_flags() {
     Command::cargo_bin("scurl")
         .unwrap()
