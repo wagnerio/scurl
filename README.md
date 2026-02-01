@@ -59,6 +59,7 @@ scurl -a https://sh.rustup.rs               # Auto-execute if safe
 scurl -p anthropic URL                      # Override provider
 scurl config                                # View current config
 scurl login                                 # Reconfigure
+scurl skill                                 # Output Claude Code skill
 ```
 
 ### Example Output
