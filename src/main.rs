@@ -340,7 +340,7 @@ impl Provider {
             Provider::XAI => "grok-4-1-fast-reasoning",
             Provider::OpenAI => "gpt-5-nano",
             Provider::AzureOpenAI => "gpt-5-nano",
-            Provider::Gemini => "gemini-2.0-flash-thinking-exp-1219",
+            Provider::Gemini => "gemini-2.5-flash",
             Provider::Ollama => "llama3.2",
         }
     }
