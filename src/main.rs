@@ -1617,7 +1617,7 @@ async fn login_command(cli: &Cli) -> Result<()> {
     println!("  2. {} (Grok 4)", "xAI".cyan());
     println!("  3. {} (GPT-5)", "OpenAI".cyan());
     println!("  4. {} (GPT-5)", "Azure OpenAI".cyan());
-    println!("  5. {} (Gemini 2.0)", "Google Gemini".cyan());
+    println!("  5. {} (Gemini 2.5)", "Google Gemini".cyan());
     println!("  6. {} (Local models via Ollama)", "Ollama".cyan());
 
     let choice = prompt("\nSelect provider [1-6]: ")?;
