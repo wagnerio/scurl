@@ -17,23 +17,29 @@ FOUND_SECRETS=0
 
 for FILE in $STAGED_FILES; do
     # Check for real Anthropic keys (not placeholders like sk-ant-xxx)
-    if git diff --cached "$FILE" | grep -qE '\+.*sk-ant-[a-zA-Z0-9]{40,}'; then
+    if git diff --cached "$FILE" | grep -qE '\+.*(^|[^a-zA-Z0-9_-])sk-ant-[a-zA-Z0-9]{40,}([^a-zA-Z0-9_-]|$)'; then
         echo "❌ Real Anthropic API key detected in: $FILE"
         FOUND_SECRETS=1
     fi
-    
+
     # Check for real xAI keys (not placeholders like xai-xxx)
-    if git diff --cached "$FILE" | grep -qE '\+.*xai-[a-zA-Z0-9]{40,}'; then
+    if git diff --cached "$FILE" | grep -qE '\+.*(^|[^a-zA-Z0-9_-])xai-[a-zA-Z0-9]{40,}([^a-zA-Z0-9_-]|$)'; then
         echo "❌ Real xAI API key detected in: $FILE"
         FOUND_SECRETS=1
     fi
-    
-    # Check for real OpenAI keys (not placeholders)
-    if git diff --cached "$FILE" | grep -qE '\+.*sk-proj-[a-zA-Z0-9]{40,}'; then
+
+    # Check for real OpenAI keys (not placeholders) - both legacy and project keys
+    if git diff --cached "$FILE" | grep -qE '\+.*(^|[^a-zA-Z0-9_-])sk-(proj-)?[a-zA-Z0-9_-]{48,}([^a-zA-Z0-9_-]|$)'; then
         echo "❌ Real OpenAI API key detected in: $FILE"
         FOUND_SECRETS=1
     fi
-    
+
+    # Check for AWS access keys
+    if git diff --cached "$FILE" | grep -qE '\+.*(^|[^a-zA-Z0-9])AKIA[A-Z0-9]{16}([^a-zA-Z0-9]|$)'; then
+        echo "❌ AWS access key detected in: $FILE"
+        FOUND_SECRETS=1
+    fi
+
     # Check for config.toml with real values
     if [[ "$FILE" == *"config.toml" ]] && [[ "$FILE" != *".example"* ]]; then
         echo "❌ Attempting to commit config.toml: $FILE"

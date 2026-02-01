@@ -30,8 +30,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: dtolnay/rust-toolchain@7b1c307e0dcbda6122208f10795a713336a9b35a # stable
       - run: cargo test --all-features
       - run: cargo clippy -- -D warnings
 
@@ -46,12 +46,12 @@ jobs:
       # Note: If 'main' has branch protection rules (required PRs, status checks),
       # replace GITHUB_TOKEN with a PAT or GitHub App token stored as a secret,
       # since GITHUB_TOKEN cannot bypass branch protection.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@7b1c307e0dcbda6122208f10795a713336a9b35a # stable
 
       - name: Install cargo-release
         run: cargo install cargo-release
@@ -104,11 +104,11 @@ jobs:
             name: scurl-windows-amd64.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           ref: ${{ needs.release.outputs.tag }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@7b1c307e0dcbda6122208f10795a713336a9b35a # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -139,7 +139,7 @@ jobs:
         run: (Get-FileHash ${{ matrix.name }} -Algorithm SHA256).Hash.ToLower() + "  " + "${{ matrix.name }}" | Out-File -Encoding ascii ${{ matrix.name }}.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
         with:
           name: ${{ matrix.name }}
           path: |
@@ -152,7 +152,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
         with:
           path: artifacts
           merge-multiple: true
@@ -161,7 +161,7 @@ jobs:
         run: ls -lR artifacts/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@e7a8f85e1c67a31e6ac94a64dacaf3f60e249467 # v2
         with:
           tag_name: ${{ needs.release.outputs.tag }}
           name: ${{ needs.release.outputs.tag }}
