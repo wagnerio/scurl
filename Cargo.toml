@@ -1,6 +1,6 @@
 [package]
 name = "scurl"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 authors = ["scurl contributors <scurl-rust@pm.me>"]
 description = "Secure curl - AI-powered security review for install scripts"
