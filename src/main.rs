@@ -21,6 +21,10 @@ struct Config {
     provider: String,
     api_key: String,
     model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    azure_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    azure_deployment: Option<String>,
 }
 
 impl Config {
@@ -297,6 +301,8 @@ enum Provider {
     Anthropic,
     XAI,
     OpenAI,
+    AzureOpenAI,
+    Gemini,
     Ollama,
 }
 
@@ -308,6 +314,8 @@ impl std::str::FromStr for Provider {
             "anthropic" | "claude" => Ok(Provider::Anthropic),
             "xai" | "x.ai" | "grok" => Ok(Provider::XAI),
             "openai" | "chatgpt" => Ok(Provider::OpenAI),
+            "azure" | "azure-openai" | "azureopenai" => Ok(Provider::AzureOpenAI),
+            "gemini" | "google" => Ok(Provider::Gemini),
             "ollama" | "local" => Ok(Provider::Ollama),
             _ => anyhow::bail!("Unknown provider: {}", s),
         }
@@ -320,6 +328,8 @@ impl Provider {
             Provider::Anthropic => "Anthropic (Claude)",
             Provider::XAI => "xAI (Grok)",
             Provider::OpenAI => "OpenAI (GPT)",
+            Provider::AzureOpenAI => "Azure OpenAI",
+            Provider::Gemini => "Google Gemini",
             Provider::Ollama => "Ollama (Local)",
         }
     }
@@ -329,6 +339,8 @@ impl Provider {
             Provider::Anthropic => "claude-haiku-4-5",
             Provider::XAI => "grok-4-1-fast-reasoning",
             Provider::OpenAI => "gpt-5-nano",
+            Provider::AzureOpenAI => "gpt-5-nano",
+            Provider::Gemini => "gemini-2.0-flash-exp",
             Provider::Ollama => "llama3.2",
         }
     }
@@ -340,6 +352,7 @@ impl Provider {
         model: Option<&str>,
         net_config: &NetworkConfig,
         static_findings: Option<&str>,
+        config: &Config,
     ) -> Result<String> {
         let model = model.unwrap_or_else(|| self.default_model());
 
@@ -416,6 +429,11 @@ Be practical: common patterns like sudo for installation, downloading from offic
                     )
                     .await
                 }
+                Provider::AzureOpenAI => {
+                    self.call_azure_openai(&prompt, api_key, config, net_config)
+                        .await
+                }
+                Provider::Gemini => self.call_gemini(&prompt, api_key, model, net_config).await,
                 Provider::Ollama => {
                     self.call_openai_compatible(
                         &prompt,
@@ -593,6 +611,183 @@ Be practical: common patterns like sudo for installation, downloading from offic
             .context("No choices in API response")?
             .message
             .content
+            .clone())
+    }
+
+    async fn call_azure_openai(
+        &self,
+        prompt: &str,
+        api_key: &str,
+        config: &Config,
+        net_config: &NetworkConfig,
+    ) -> Result<String> {
+        #[derive(Serialize)]
+        struct Message {
+            role: String,
+            content: String,
+        }
+
+        #[derive(Serialize)]
+        struct Request {
+            messages: Vec<Message>,
+            max_tokens: Option<u32>,
+        }
+
+        #[derive(Deserialize)]
+        struct Choice {
+            message: ResponseMessage,
+        }
+
+        #[derive(Deserialize)]
+        struct ResponseMessage {
+            content: String,
+        }
+
+        #[derive(Deserialize)]
+        struct Response {
+            choices: Vec<Choice>,
+        }
+
+        let endpoint = config
+            .azure_endpoint
+            .as_ref()
+            .context("Azure endpoint not configured")?;
+        let deployment = config
+            .azure_deployment
+            .as_ref()
+            .context("Azure deployment not configured")?;
+
+        // Azure OpenAI endpoint format:
+        // https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version=2024-02-15-preview
+        let url = format!(
+            "{}/openai/deployments/{}/chat/completions?api-version=2024-08-01-preview",
+            endpoint.trim_end_matches('/'),
+            deployment
+        );
+
+        let request = Request {
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: prompt.to_string(),
+            }],
+            max_tokens: Some(2048),
+        };
+
+        let response = net_config
+            .api_client
+            .post(&url)
+            .header("api-key", api_key)
+            .header("content-type", "application/json")
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to call Azure OpenAI API")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            anyhow::bail!("API error {}: {}", status, error_text);
+        }
+
+        let api_response: Response = response
+            .json()
+            .await
+            .context("Failed to parse API response")?;
+
+        Ok(api_response
+            .choices
+            .first()
+            .context("No choices in API response")?
+            .message
+            .content
+            .clone())
+    }
+
+    async fn call_gemini(
+        &self,
+        prompt: &str,
+        api_key: &str,
+        model: &str,
+        net_config: &NetworkConfig,
+    ) -> Result<String> {
+        #[derive(Serialize)]
+        struct Part {
+            text: String,
+        }
+
+        #[derive(Serialize)]
+        struct Content {
+            parts: Vec<Part>,
+        }
+
+        #[derive(Serialize)]
+        struct Request {
+            contents: Vec<Content>,
+        }
+
+        #[derive(Deserialize)]
+        struct ResponsePart {
+            text: String,
+        }
+
+        #[derive(Deserialize)]
+        struct ResponseContent {
+            parts: Vec<ResponsePart>,
+        }
+
+        #[derive(Deserialize)]
+        struct Candidate {
+            content: ResponseContent,
+        }
+
+        #[derive(Deserialize)]
+        struct Response {
+            candidates: Vec<Candidate>,
+        }
+
+        // Gemini API endpoint: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            model, api_key
+        );
+
+        let request = Request {
+            contents: vec![Content {
+                parts: vec![Part {
+                    text: prompt.to_string(),
+                }],
+            }],
+        };
+
+        let response = net_config
+            .api_client
+            .post(&url)
+            .header("content-type", "application/json")
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to call Gemini API")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            anyhow::bail!("API error {}: {}", status, error_text);
+        }
+
+        let api_response: Response = response
+            .json()
+            .await
+            .context("Failed to parse API response")?;
+
+        Ok(api_response
+            .candidates
+            .first()
+            .context("No candidates in API response")?
+            .content
+            .parts
+            .first()
+            .context("No parts in candidate content")?
+            .text
             .clone())
     }
 }
@@ -1327,6 +1522,7 @@ async fn analyze_script(
             config.model.as_deref(),
             net_config,
             static_findings,
+            config,
         )
         .await?;
 
@@ -1420,15 +1616,19 @@ async fn login_command(cli: &Cli) -> Result<()> {
     );
     println!("  2. {} (Grok 4)", "xAI".cyan());
     println!("  3. {} (GPT-5)", "OpenAI".cyan());
-    println!("  4. {} (Local models via Ollama)", "Ollama".cyan());
+    println!("  4. {} (GPT-5)", "Azure OpenAI".cyan());
+    println!("  5. {} (Gemini 2.0)", "Google Gemini".cyan());
+    println!("  6. {} (Local models via Ollama)", "Ollama".cyan());
 
-    let choice = prompt("\nSelect provider [1-4]: ")?;
+    let choice = prompt("\nSelect provider [1-6]: ")?;
 
     let provider_name = match choice.as_str() {
         "1" => "anthropic",
         "2" => "xai",
         "3" => "openai",
-        "4" => "ollama",
+        "4" => "azure-openai",
+        "5" => "gemini",
+        "6" => "ollama",
         _ => {
             anyhow::bail!("Invalid choice. Please run 'scurl login' again.");
         }
@@ -1442,8 +1642,8 @@ async fn login_command(cli: &Cli) -> Result<()> {
         provider.name().bright_white().bold()
     );
 
-    // Get API key
-    let api_key = if matches!(provider, Provider::Ollama) {
+    // Get API key and Azure-specific configuration
+    let (api_key, azure_endpoint, azure_deployment) = if matches!(provider, Provider::Ollama) {
         println!("\n{}", "Ollama Setup:".bold());
         println!("  → Install Ollama from https://ollama.ai");
         println!("  → Run: ollama pull llama3.2 (or your preferred model)");
@@ -1454,18 +1654,44 @@ async fn login_command(cli: &Cli) -> Result<()> {
         );
 
         let api_key_input = prompt("\nEnter API key (press Enter to skip for Ollama): ")?;
-        if api_key_input.is_empty() {
+        let key = if api_key_input.is_empty() {
             "ollama-no-key".to_string()
         } else {
             api_key_input
+        };
+        (key, None, None)
+    } else if matches!(provider, Provider::AzureOpenAI) {
+        println!("\n{}", "Azure OpenAI Setup:".bold());
+        println!("  → Go to Azure Portal: https://portal.azure.com");
+        println!("  → Navigate to your Azure OpenAI resource");
+        println!("  → Get your endpoint (e.g., https://your-resource.openai.azure.com)");
+        println!("  → Get your API key from Keys and Endpoint");
+        println!("  → Note your deployment name");
+
+        let endpoint_input = prompt("\nEnter your Azure endpoint URL: ")?;
+        if endpoint_input.is_empty() {
+            anyhow::bail!("Azure endpoint cannot be empty");
         }
+
+        let api_key_input = prompt("\nEnter your API key: ")?;
+        if api_key_input.is_empty() {
+            anyhow::bail!("API key cannot be empty");
+        }
+
+        let deployment_input = prompt("\nEnter your deployment name: ")?;
+        if deployment_input.is_empty() {
+            anyhow::bail!("Deployment name cannot be empty");
+        }
+
+        (api_key_input, Some(endpoint_input), Some(deployment_input))
     } else {
         println!("\n{}", "Get your API key:".bold());
         match provider {
             Provider::Anthropic => println!("  → https://console.anthropic.com"),
             Provider::XAI => println!("  → https://console.x.ai"),
             Provider::OpenAI => println!("  → https://platform.openai.com/api-keys"),
-            Provider::Ollama => unreachable!(),
+            Provider::Gemini => println!("  → https://aistudio.google.com/app/apikey"),
+            Provider::AzureOpenAI | Provider::Ollama => unreachable!(),
         }
 
         let api_key_input = prompt("\nEnter your API key: ")?;
@@ -1474,7 +1700,7 @@ async fn login_command(cli: &Cli) -> Result<()> {
             anyhow::bail!("API key cannot be empty");
         }
 
-        api_key_input
+        (api_key_input, None, None)
     };
 
     // Optional: custom model
@@ -1495,9 +1721,25 @@ async fn login_command(cli: &Cli) -> Result<()> {
     let spinner = new_spinner("Testing API connection...");
     let net_config = NetworkConfig::from_cli(cli)?;
 
+    // Create temporary config for testing
+    let test_config = Config {
+        provider: provider_name.to_string(),
+        api_key: api_key.clone(),
+        model: model.clone(),
+        azure_endpoint: azure_endpoint.clone(),
+        azure_deployment: azure_deployment.clone(),
+    };
+
     let test_script = "#!/bin/bash\necho 'Hello, World!'";
     match provider
-        .analyze(test_script, &api_key, model.as_deref(), &net_config, None)
+        .analyze(
+            test_script,
+            &test_config.api_key,
+            test_config.model.as_deref(),
+            &net_config,
+            None,
+            &test_config,
+        )
         .await
     {
         Ok(_) => {
@@ -1515,6 +1757,8 @@ async fn login_command(cli: &Cli) -> Result<()> {
         provider: provider_name.to_string(),
         api_key,
         model,
+        azure_endpoint,
+        azure_deployment,
     };
 
     config.save()?;
@@ -1596,6 +1840,8 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
                     provider: provider.clone(),
                     api_key,
                     model: None,
+                    azure_endpoint: std::env::var("AZURE_OPENAI_ENDPOINT").ok(),
+                    azure_deployment: std::env::var("AZURE_OPENAI_DEPLOYMENT").ok(),
                 }
             }
         }
@@ -1848,6 +2094,22 @@ RECOMMENDATION: Some recommendation
             Provider::OpenAI
         ));
         assert!(matches!(
+            "azure".parse::<Provider>().unwrap(),
+            Provider::AzureOpenAI
+        ));
+        assert!(matches!(
+            "azure-openai".parse::<Provider>().unwrap(),
+            Provider::AzureOpenAI
+        ));
+        assert!(matches!(
+            "gemini".parse::<Provider>().unwrap(),
+            Provider::Gemini
+        ));
+        assert!(matches!(
+            "google".parse::<Provider>().unwrap(),
+            Provider::Gemini
+        ));
+        assert!(matches!(
             "ollama".parse::<Provider>().unwrap(),
             Provider::Ollama
         ));
@@ -1868,6 +2130,12 @@ RECOMMENDATION: Some recommendation
 
         let openai = Provider::OpenAI;
         assert_eq!(openai.default_model(), "gpt-5-nano");
+
+        let azure = Provider::AzureOpenAI;
+        assert_eq!(azure.default_model(), "gpt-4o");
+
+        let gemini = Provider::Gemini;
+        assert!(gemini.default_model().contains("gemini"));
 
         let ollama = Provider::Ollama;
         assert_eq!(ollama.default_model(), "llama3.2");
