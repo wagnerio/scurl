@@ -1,6 +1,6 @@
 [package]
 name = "scurl"
-version = "0.3.4"
+version = "0.4.0"
 edition = "2021"
 authors = ["scurl contributors <scurl-rust@pm.me>"]
 description = "Secure curl - AI-powered security review for install scripts"
@@ -24,6 +24,8 @@ dirs = "5.0"
 indicatif = "0.17"
 regex = "1"
 futures-util = "0.3"
+sha2 = "0.10"
+keyring = "3"
 
 [dev-dependencies]
 tokio-test = "0.4"
