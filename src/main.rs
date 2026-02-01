@@ -934,7 +934,6 @@ fn parse_analysis(text: &str) -> Result<SecurityAnalysis> {
         let mut level = risk_level;
         let findings_lower: Vec<String> =
             findings.iter().map(|f| f.to_lowercase()).collect();
-        let all_findings_text = findings_lower.join(" ");
 
         let dangerous_keywords = [
             "reverse shell",
@@ -950,9 +949,34 @@ fn parse_analysis(text: &str) -> Result<SecurityAnalysis> {
         ];
 
         if matches!(level, RiskLevel::Safe | RiskLevel::Low) {
-            let has_dangerous = dangerous_keywords
-                .iter()
-                .any(|kw| all_findings_text.contains(kw));
+            let negation_patterns = [
+                "no ", "no\u{00a0}", "not ", "without ", "non-", "non\u{00a0}",
+                "absence of ", "free of ", "doesn't ", "does not ",
+                "don't ", "do not ", "didn't ", "did not ",
+                "isn't ", "is not ", "aren't ", "are not ",
+                "wasn't ", "was not ", "weren't ", "were not ",
+                "won't ", "will not ", "cannot ", "can't ",
+            ];
+            let has_dangerous = dangerous_keywords.iter().any(|kw| {
+                // Check each finding individually so negation scope stays
+                // within a single finding rather than bleeding across them
+                for finding in &findings_lower {
+                    let mut start = 0;
+                    while let Some(pos) = finding[start..].find(kw) {
+                        let abs_pos = start + pos;
+                        let prefix_region =
+                            &finding[abs_pos.saturating_sub(50)..abs_pos];
+                        let negated = negation_patterns.iter().any(|neg| {
+                            prefix_region.contains(neg)
+                        });
+                        if !negated {
+                            return true;
+                        }
+                        start = abs_pos + kw.len();
+                    }
+                }
+                false
+            });
             if has_dangerous {
                 eprintln!(
                     "{} AI rated script as {:?} but findings mention dangerous keywords — escalating to HIGH.",
@@ -3006,6 +3030,22 @@ RECOMMENDATION: This script is safe to execute.
         let result = parse_analysis(text).unwrap();
         // Should be escalated from SAFE to HIGH due to "reverse shell", "backdoor", "exfiltrat"
         assert_eq!(result.risk_level, RiskLevel::High);
+    }
+
+    #[test]
+    fn test_contradiction_detection_negated_keywords_not_escalated() {
+        let text = r#"
+RISK_LEVEL: SAFE
+FINDINGS:
+- No backdoors or malicious payloads detected
+- No credential harvesting or exfiltration found
+- Does not contain a reverse shell
+- Script is not dangerous
+RECOMMENDATION: This script is safe to execute.
+"#;
+        let result = parse_analysis(text).unwrap();
+        // Negated keywords should NOT trigger escalation
+        assert_eq!(result.risk_level, RiskLevel::Safe);
     }
 
     #[test]
