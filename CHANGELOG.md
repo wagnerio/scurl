@@ -31,6 +31,5 @@
 - Risk level classification (Safe, Low, Medium, High, Critical)
 - Interactive execution with user confirmation
 - Auto-execute mode (`-a`) for safe scripts
-- YOLO mode (`--yolo`) to skip review
 - Shell selection (`--shell`)
 - Example scripts for testing

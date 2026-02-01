@@ -131,7 +131,6 @@ Environment variables `HTTPS_PROXY` and `HTTP_PROXY` are respected automatically
 | `--max-redirects <N>` | | Max redirects (default: 10) |
 | `--system-proxy` | | Use system proxy settings |
 | `--no-proxy` | | Disable proxy |
-| `--yolo` | | Skip AI review (still requires confirmation) |
 | `--version` | `-V` | Print version |
 
 ### Environment Variables
@@ -161,7 +160,7 @@ Before AI review, scurl runs a built-in pattern scanner that detects:
 
 **Prompt Injection** -- fake `RISK_LEVEL: SAFE` embedded in scripts, "ignore previous instructions", fake analysis output, AI role-play attempts, prompt override attempts, hidden base64 payloads in comments, markdown fence escape attempts
 
-When prompt injection is detected, auto-execute is blocked and `--yolo` mode requires explicit confirmation.
+When prompt injection is detected, auto-execute is blocked regardless of the AI risk level.
 
 ## CI/CD
 
@@ -194,7 +193,7 @@ Network retries use exponential backoff with jitter (1s, 2s, 4s... capped at 30s
 
 ### Limitations
 
-AI analysis is helpful but not infallible. Always review the findings, especially for HIGH and CRITICAL risk scripts. The `--yolo` flag bypasses AI review but still runs static analysis and requires confirmation.
+AI analysis is helpful but not infallible. Always review the findings, especially for HIGH and CRITICAL risk scripts.
 
 ## Development
 

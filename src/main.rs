@@ -120,10 +120,6 @@ struct Cli {
     #[arg(short, long, global = true)]
     auto_execute: bool,
 
-    /// Skip AI review and just download + execute (dangerous!)
-    #[arg(long, global = true)]
-    yolo: bool,
-
     /// Override provider from config
     #[arg(short = 'p', long, global = true)]
     provider: Option<String>,
@@ -177,6 +173,8 @@ enum Commands {
     },
     /// Show current configuration
     Config,
+    /// Output the openclaw Claude Code skill (SKILL.md)
+    Skill,
 }
 
 // ============================================================================
@@ -1820,6 +1818,78 @@ fn config_command() -> Result<()> {
     Ok(())
 }
 
+fn skill_command() -> Result<()> {
+    print!(
+        r#"---
+name: openclaw
+description: Security review for installation scripts using scurl. Analyzes URLs for dangerous patterns, prompt injection, and security risks before execution. Use when reviewing shell scripts, install scripts, or any piped-to-bash content.
+user-invocable: true
+allowed-tools: Bash
+argument-hint: <url>
+---
+
+# openclaw — Security Review via scurl
+
+Run `scurl` to analyze a script URL for security risks and present the findings.
+
+## Input
+
+`$ARGUMENTS` is a URL to analyze. If no argument is provided, ask the user for the URL.
+
+## Execution
+
+Run scurl against the target URL. Choose flags based on context:
+
+```bash
+scurl $ARGUMENTS
+```
+
+If the user wants auto-execution of safe scripts:
+```bash
+scurl -a $ARGUMENTS
+```
+
+If the user specifies a provider:
+```bash
+scurl -p <provider> $ARGUMENTS
+```
+
+## Requirements
+
+- `scurl` must be installed (`cargo install scurl`)
+- An AI provider must be configured (`scurl login`) or `SCURL_API_KEY` must be set
+
+If `scurl` is not found, tell the user to install it:
+```
+cargo install scurl
+```
+
+## Available Flags
+
+Pass through any flags the user requests:
+
+| Flag | Description |
+|------|-------------|
+| `-a` | Auto-execute if risk is SAFE or LOW |
+| `-p <provider>` | Override AI provider (anthropic, openai, xai, azure, gemini, ollama) |
+| `-s <shell>` | Shell for execution (default: bash) |
+| `-x <url>` | HTTP/HTTPS proxy |
+| `-t <secs>` | Request timeout |
+| `-k` | Skip TLS verification for script download |
+| `-H <header>` | Custom request header |
+| `--retries <n>` | Retry attempts |
+
+## Rules
+
+- Always show the full scurl output to the user
+- Do not attempt to parse or reformat scurl's output — it has its own report format
+- If scurl prompts "Execute this script? [y/N]:", tell the user and let them decide
+- Do not pass `-a` unless the user explicitly asks for auto-execution
+"#
+    );
+    Ok(())
+}
+
 async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
     println!(
         "\n{} {}\n",
@@ -1881,41 +1951,6 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
 
     // Disable auto-execute if critical findings
     let force_no_auto = static_report.has_critical;
-
-    // YOLO mode - skip AI review but check for prompt injection
-    if cli.yolo {
-        println!(
-            "\n{}",
-            "⚠️  YOLO mode enabled - skipping AI security review!"
-                .bright_red()
-                .bold()
-        );
-
-        if static_report.has_prompt_injection {
-            println!(
-                "{}",
-                "⚠️  PROMPT INJECTION DETECTED - Manual confirmation required!"
-                    .red()
-                    .bold()
-            );
-            if !prompt_user_confirmation()? {
-                println!("\n{}", "Execution cancelled by user".yellow());
-                return Ok(());
-            }
-        } else {
-            println!(
-                "{}",
-                "⚠️  Proceeding without AI review - confirm execution:".yellow()
-            );
-            if !prompt_user_confirmation()? {
-                println!("\n{}", "Execution cancelled by user".yellow());
-                return Ok(());
-            }
-        }
-
-        execute_script(&script, &cli.shell)?;
-        return Ok(());
-    }
 
     // Format static findings for AI
     let static_findings_text = if !static_report.findings.is_empty() {
@@ -1993,6 +2028,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Commands::Login) => login_command(&cli).await,
         Some(Commands::Config) => config_command(),
+        Some(Commands::Skill) => skill_command(),
         Some(Commands::Analyze { ref url }) => analyze_command(url, &cli).await,
         None => {
             if let Some(ref url) = cli.url {
@@ -2005,6 +2041,7 @@ async fn main() -> Result<()> {
                 println!("  {}  Configure your AI provider", "scurl login".green());
                 println!("  {}     Analyze a script", "scurl <URL>".green());
                 println!("  {}      Show configuration", "scurl config".green());
+                println!("  {}      Output openclaw Claude Code skill", "scurl skill".green());
                 println!("\nFor more help: {}", "scurl --help".cyan());
                 Ok(())
             }
