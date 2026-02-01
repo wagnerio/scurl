@@ -13,6 +13,10 @@ use std::process::Command;
 use std::time::{Duration, SystemTime};
 use tempfile::NamedTempFile;
 
+/// Maximum size for AI provider responses (1 MB).
+/// Guards against excessively large or malicious responses from providers.
+const MAX_AI_RESPONSE_BYTES: usize = 1024 * 1024;
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -60,6 +64,17 @@ impl Config {
                         e
                     );
                 }
+            }
+        } else if config.api_key != "ollama-no-key" {
+            // API key is stored in plaintext — warn if keyring is available
+            if keyring::Entry::new("scurl", &config.provider).is_ok() {
+                eprintln!(
+                    "{} API key is stored in plaintext config file. \
+                     Run '{}' to migrate to the OS keyring, or set {} env var.",
+                    "⚠".yellow(),
+                    "scurl login".green().bold(),
+                    "SCURL_API_KEY".cyan()
+                );
             }
         }
 
@@ -556,10 +571,16 @@ Be practical: common patterns like sudo for installation, downloading from offic
             anyhow::bail!("API error {}: {}", status, error_text);
         }
 
-        let api_response: Response = response
-            .json()
-            .await
-            .context("Failed to parse API response")?;
+        let body = response.bytes().await.context("Failed to read API response")?;
+        if body.len() > MAX_AI_RESPONSE_BYTES {
+            anyhow::bail!(
+                "AI response too large ({} bytes, max {})",
+                body.len(),
+                MAX_AI_RESPONSE_BYTES
+            );
+        }
+        let api_response: Response =
+            serde_json::from_slice(&body).context("Failed to parse API response")?;
 
         Ok(api_response
             .content
@@ -636,10 +657,16 @@ Be practical: common patterns like sudo for installation, downloading from offic
             anyhow::bail!("API error {}: {}", status, error_text);
         }
 
-        let api_response: Response = response
-            .json()
-            .await
-            .context("Failed to parse API response")?;
+        let body = response.bytes().await.context("Failed to read API response")?;
+        if body.len() > MAX_AI_RESPONSE_BYTES {
+            anyhow::bail!(
+                "AI response too large ({} bytes, max {})",
+                body.len(),
+                MAX_AI_RESPONSE_BYTES
+            );
+        }
+        let api_response: Response =
+            serde_json::from_slice(&body).context("Failed to parse API response")?;
 
         Ok(api_response
             .choices
@@ -725,10 +752,16 @@ Be practical: common patterns like sudo for installation, downloading from offic
             anyhow::bail!("API error {}: {}", status, error_text);
         }
 
-        let api_response: Response = response
-            .json()
-            .await
-            .context("Failed to parse API response")?;
+        let body = response.bytes().await.context("Failed to read API response")?;
+        if body.len() > MAX_AI_RESPONSE_BYTES {
+            anyhow::bail!(
+                "AI response too large ({} bytes, max {})",
+                body.len(),
+                MAX_AI_RESPONSE_BYTES
+            );
+        }
+        let api_response: Response =
+            serde_json::from_slice(&body).context("Failed to parse API response")?;
 
         Ok(api_response
             .choices
@@ -810,10 +843,16 @@ Be practical: common patterns like sudo for installation, downloading from offic
             anyhow::bail!("API error {}: {}", status, error_text);
         }
 
-        let api_response: Response = response
-            .json()
-            .await
-            .context("Failed to parse API response")?;
+        let body = response.bytes().await.context("Failed to read API response")?;
+        if body.len() > MAX_AI_RESPONSE_BYTES {
+            anyhow::bail!(
+                "AI response too large ({} bytes, max {})",
+                body.len(),
+                MAX_AI_RESPONSE_BYTES
+            );
+        }
+        let api_response: Response =
+            serde_json::from_slice(&body).context("Failed to parse API response")?;
 
         Ok(api_response
             .candidates
@@ -1684,7 +1723,7 @@ async fn analyze_script(
     config: &Config,
     net_config: &NetworkConfig,
     static_findings: Option<&str>,
-) -> Result<SecurityAnalysis> {
+) -> Result<(SecurityAnalysis, String)> {
     let provider: Provider = config.provider.parse()?;
     let spinner = new_spinner(&format!("Analyzing script with {} AI...", provider.name()));
 
@@ -1702,7 +1741,8 @@ async fn analyze_script(
 
     spinner.finish_with_message(format!("{} Analysis complete!", "✓".green()));
 
-    parse_analysis(&response_text)
+    let analysis = parse_analysis(&response_text)?;
+    Ok((analysis, response_text))
 }
 
 fn prompt_user_confirmation() -> Result<bool> {
@@ -1829,6 +1869,8 @@ fn execute_sandboxed_bwrap(
     // Security hardening
     cmd.arg("--new-session");
     cmd.arg("--die-with-parent");
+    // Drop all capabilities
+    cmd.arg("--cap-drop").arg("ALL");
     // Shell and script
     cmd.arg(shell).arg(script_path_str);
 
@@ -2311,6 +2353,7 @@ fn write_audit_log(
     has_critical: bool,
     has_prompt_injection: bool,
     ai_risk_level: &str,
+    ai_raw_response: &str,
     decision: &str,
     sandboxed: bool,
 ) {
@@ -2343,10 +2386,16 @@ fn write_audit_log(
 
         // Escape JSON string values
         let url_escaped = url.replace('\\', "\\\\").replace('"', "\\\"");
+        let response_escaped = ai_raw_response
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t");
 
         let entry = format!(
-            "{{\"timestamp\":\"{}\",\"url\":\"{}\",\"sha256\":\"{}\",\"size_bytes\":{},\"static_findings\":{},\"has_critical\":{},\"has_prompt_injection\":{},\"ai_risk_level\":\"{}\",\"decision\":\"{}\",\"sandboxed\":{}}}\n",
-            timestamp, url_escaped, script_hash, script_size, static_finding_count, has_critical, has_prompt_injection, ai_risk_level, decision, sandboxed
+            "{{\"timestamp\":\"{}\",\"url\":\"{}\",\"sha256\":\"{}\",\"size_bytes\":{},\"static_findings\":{},\"has_critical\":{},\"has_prompt_injection\":{},\"ai_risk_level\":\"{}\",\"ai_raw_response\":\"{}\",\"decision\":\"{}\",\"sandboxed\":{}}}\n",
+            timestamp, url_escaped, script_hash, script_size, static_finding_count, has_critical, has_prompt_injection, ai_risk_level, response_escaped, decision, sandboxed
         );
 
         use std::fs::OpenOptions;
@@ -2438,13 +2487,17 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
 
     if cli.auto_execute {
         eprintln!(
-            "\n{}\n{}\n",
-            "WARNING: Auto-execute mode is enabled. Scripts classified as SAFE or LOW"
+            "\n{}\n{}\n{}\n{}\n",
+            "WARNING: Auto-execute mode is enabled."
                 .yellow()
                 .bold(),
-            "will be executed without confirmation. Use with caution."
+            "Scripts classified as SAFE or LOW will run without confirmation."
+                .yellow(),
+            "Even with sandboxing, a theoretical sandbox escape could compromise the host."
+                .yellow(),
+            "Consider restricting auto-execute to local models (e.g. --provider ollama).\n\
+             Sandbox runs with all capabilities dropped (--cap-drop ALL on Linux)."
                 .yellow()
-                .bold()
         );
     }
 
@@ -2486,7 +2539,7 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
     };
 
     // Perform AI security analysis
-    let analysis = analyze_script(
+    let (analysis, ai_raw_response) = analyze_script(
         &script,
         &config,
         &net_config,
@@ -2554,6 +2607,7 @@ async fn analyze_command(url: &str, cli: &Cli) -> Result<()> {
         static_report.has_critical,
         static_report.has_prompt_injection,
         &ai_risk_str,
+        &ai_raw_response,
         decision,
         sandboxed,
     );

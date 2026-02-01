@@ -38,15 +38,16 @@ Override provider and key inline -- no `scurl login` needed:
 ```yaml
 # GitHub Actions
 - name: Install tool with scurl
+  env:
+    SCURL_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
   run: |
-    scurl --provider anthropic --api-key ${{ secrets.ANTHROPIC_API_KEY }} \
-      --auto-execute https://example.com/install.sh
+    scurl --provider anthropic --auto-execute https://example.com/install.sh
 ```
 
 ```yaml
 # GitLab CI
 script:
-  - scurl --provider xai --api-key $SCURL_API_KEY --auto-execute URL
+  - SCURL_API_KEY=$SCURL_API_KEY scurl --provider xai --auto-execute URL
 ```
 
 ## Testing Example Scripts
@@ -82,7 +83,7 @@ scurl https://get.docker.com
 
 **"API error 401"** -- Invalid API key. Run `scurl login` to reconfigure, or check with `scurl config`.
 
-**"Unknown provider"** -- Valid providers: `anthropic`, `xai`, `openai`, `ollama`.
+**"Unknown provider"** -- Valid providers: `anthropic`, `xai`, `openai`, `azure-openai`, `gemini`, `ollama`.
 
 **Script executes but fails** -- scurl analyzes security, not correctness. A safe script can still have bugs or missing dependencies.
 

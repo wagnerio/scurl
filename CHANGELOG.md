@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.1] - 2026-02-01
+
+### Added
+- **Plaintext API key warning** — warns at startup when a key is stored in plaintext config and OS keyring is available, directing users to `scurl login` to migrate
+- **Bwrap capability dropping** — bubblewrap sandbox now runs with `--cap-drop ALL`, preventing privilege escalation via Linux capabilities
+- **AI response size limit** — all provider responses are capped at 1 MB to guard against excessively large or malicious payloads
+- **Raw AI response in audit log** — `ai_raw_response` field added to `~/.scurl/audit.log` entries for forensic analysis
+- **Enhanced auto-execute warning** — explicitly warns about sandbox escape risk and recommends restricting auto-execute to local models
+
+### Changed
+- `serde_json` added as an explicit dependency for byte-level response parsing
+
 ## [0.4.0] - 2026-02-01
 
 ### Added

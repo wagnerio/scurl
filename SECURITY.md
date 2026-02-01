@@ -61,15 +61,15 @@ When using scurl in CI/CD, use proper secret management:
 ```yaml
 - name: Run scurl
   env:
-    API_KEY: ${{ secrets.SCURL_API_KEY }}
+    SCURL_API_KEY: ${{ secrets.SCURL_API_KEY }}
   run: |
-    scurl --api-key "$API_KEY" --provider xai https://example.com/install.sh
+    scurl --provider xai https://example.com/install.sh
 ```
 
 **GitLab CI:**
 ```yaml
 script:
-  - scurl --api-key $SCURL_API_KEY --provider anthropic https://example.com/install.sh
+  - SCURL_API_KEY=$SCURL_API_KEY scurl --provider anthropic https://example.com/install.sh
 ```
 
 Never hardcode keys in CI config files!
@@ -125,12 +125,13 @@ If you discover a security vulnerability in scurl:
 
 ### Additional Security Features
 
-- **OS Keyring Integration** - API keys can be stored in the OS keyring (macOS Keychain, Windows Credential Manager, Linux Secret Service) instead of plaintext config files. Run `scurl login` and the key will be stored in the keyring automatically when available.
-- **Audit Logging** - Every analysis is logged to `~/.scurl/audit.log` with timestamp, URL, SHA-256 hash, findings summary, risk level, and execution decision. The log file has `0600` permissions.
+- **OS Keyring Integration** - API keys can be stored in the OS keyring (macOS Keychain, Windows Credential Manager, Linux Secret Service) instead of plaintext config files. Run `scurl login` and the key will be stored in the keyring automatically when available. If a key is stored in plaintext and the keyring is available, scurl warns at startup and directs you to migrate.
+- **Audit Logging** - Every analysis is logged to `~/.scurl/audit.log` with timestamp, URL, SHA-256 hash, findings summary, risk level, raw AI response, and execution decision. The log file has `0600` permissions.
 - **Script SHA-256 Hashing** - SHA-256 hashes are computed and displayed for every downloaded script, enabling verification and traceability.
 - **Shell Validation** - The `--shell` flag is validated against an allowlist of known shells (`bash`, `sh`, `zsh`, `fish`, `dash`, `ksh`, `csh`, `tcsh`) and verified to exist on the system.
 - **Null Byte Detection** - Downloaded scripts are rejected if they contain null bytes, preventing binary injection.
 - **AI Contradiction Detection** - If AI analysis rates a script as SAFE/LOW but mentions dangerous keywords (reverse shell, backdoor, etc.), the risk level is automatically escalated.
+- **AI Response Size Limit** - Provider responses are capped at 1 MB to guard against excessively large or malicious payloads.
 
 ### Sandboxed Execution
 
@@ -144,6 +145,7 @@ Script execution is sandboxed by default using OS-level isolation. Opt out with 
 **What the sandbox restricts:**
 - **Network:** All network access is denied (no outbound connections, loopback only on Linux with bwrap).
 - **Filesystem:** Root filesystem is read-only. Only `/tmp` is writable. System directories (`/usr`, `/bin`, `/lib`, `/etc`) are mounted read-only.
+- **Capabilities (bwrap):** All Linux capabilities are dropped (`--cap-drop ALL`), preventing escalation via `CAP_SYS_PTRACE`, `CAP_NET_RAW`, etc.
 - **Process isolation (bwrap):** PID, IPC, UTS, and cgroup namespaces are isolated. Terminal injection is prevented via `--new-session`.
 
 If sandboxing is enabled and no backend is found, scurl will refuse to execute and print installation instructions. This is intentional — silent fallback to unsandboxed execution would defeat the purpose of a security tool.

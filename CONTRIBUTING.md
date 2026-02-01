@@ -14,7 +14,7 @@ Requires Rust 1.70+ ([rustup.rs](https://rustup.rs)) and an AI provider configur
 ## Build & Test
 
 ```bash
-make test       # Run all tests (10 unit + 4 integration)
+make test       # Run all tests (42 unit + 4 integration)
 make check      # fmt + clippy + audit
 make lint       # Strict clippy lints
 make fmt        # Format code
@@ -49,14 +49,14 @@ git config core.hooksPath .githooks
 ## Areas for Contribution
 
 - Split `main.rs` into modules (`config.rs`, `provider.rs`, `network.rs`, `analysis.rs`)
-- Script sandboxing for safer execution
-- Checksum verification for downloaded scripts
 - Source reputation scoring based on domain
 - Caching of known-safe scripts (hash-based)
 - Batch mode for analyzing multiple scripts
 - `--quiet` / `--json` output modes
 - Property-based testing (proptest)
 - Mock AI responses for deterministic tests
+- Seccomp BPF filter for bwrap sandbox (block dangerous syscalls like `ptrace`, `mount`)
+- SBOM generation for supply-chain transparency
 
 ## License
 

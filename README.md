@@ -34,7 +34,7 @@ Requires Rust 1.70+ ([rustup.rs](https://rustup.rs)).
 scurl login
 ```
 
-Choose your AI provider, enter credentials (or skip for Ollama), done. Config is saved to `~/.scurl/config.toml` with `0600` permissions in a `0700` directory.
+Choose your AI provider, enter credentials (or skip for Ollama), done. Config is saved to `~/.scurl/config.toml` with `0600` permissions in a `0700` directory. API keys are stored in the OS keyring (macOS Keychain, Windows Credential Manager, Linux Secret Service) when available, falling back to plaintext config with a warning.
 
 For maximum security, use the `SCURL_API_KEY` environment variable instead of storing the key in the config file.
 
@@ -149,7 +149,7 @@ Environment variables `HTTPS_PROXY` and `HTTP_PROXY` are respected automatically
 1. **Validate** the URL (only `http`/`https` schemes allowed)
 2. **Download** the script with streaming, retry logic, and size limits (10 MB max)
 3. **Static analysis** scans for 22 dangerous patterns: shell exploits, reverse shells, data exfiltration, and prompt injection attempts
-4. **AI analysis** via your configured provider, with static findings forwarded for context
+4. **AI analysis** via your configured provider, with static findings forwarded for context (responses capped at 1 MB)
 5. **Report** risk level, findings, and recommendation
 6. **Prompt** for confirmation (or auto-execute with `-a` if safe and no critical static findings)
 7. **Execute** in a temporary file (`0700` permissions) with your chosen shell
@@ -195,7 +195,7 @@ Network retries use exponential backoff with jitter (1s, 2s, 4s... capped at 30s
 
 ### Sandboxed Execution
 
-Scripts run inside an OS-level sandbox by default. Network access is denied and the filesystem is read-only (except `/tmp`). On Linux, scurl uses [bubblewrap](https://github.com/containers/bubblewrap) (preferred) or firejail as a fallback. On macOS, it uses `sandbox-exec`. If no backend is found, execution is refused with install instructions. Opt out with `--no-sandbox`. See [SECURITY.md](SECURITY.md) for full details.
+Scripts run inside an OS-level sandbox by default. Network access is denied, the filesystem is read-only (except `/tmp`), and all Linux capabilities are dropped (`--cap-drop ALL`). On Linux, scurl uses [bubblewrap](https://github.com/containers/bubblewrap) (preferred) or firejail as a fallback. On macOS, it uses `sandbox-exec`. If no backend is found, execution is refused with install instructions. Opt out with `--no-sandbox`. See [SECURITY.md](SECURITY.md) for full details.
 
 ### Limitations
 

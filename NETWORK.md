@@ -85,7 +85,7 @@ scurl --retries 1 URL
 scurl --retries 10 URL
 ```
 
-Retries use exponential backoff: 1s, 2s, 3s, etc.
+Retries use exponential backoff with jitter: 1s, 2s, 4s, 8s... capped at 30s.
 
 ### Redirects
 
@@ -159,7 +159,7 @@ scurl -A "MyCompany-DeployBot/2.0" URL
 scurl -A "Mozilla/5.0 (compatible)" URL
 ```
 
-Default: `scurl/0.1.0`
+Default: `scurl/<current-version>` (e.g. `scurl/0.4.1`)
 
 ## Environment Variables
 
