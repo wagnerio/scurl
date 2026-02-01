@@ -17,6 +17,8 @@ jobs:
     steps:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
     - uses: dtolnay/rust-toolchain@7b1c307e0dcbda6122208f10795a713336a9b35a # stable
+      with:
+        toolchain: stable
     - name: Build
       run: cargo build --verbose
     - name: Run tests
