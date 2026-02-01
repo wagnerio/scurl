@@ -8,7 +8,7 @@ AI-powered security review for installation scripts. Stop blindly piping `curl |
 curl -fsSL https://example.com/install.sh | bash
 ```
 
-You're executing unreviewed code with your user privileges. scurl downloads the script, sends it to an AI for security analysis, shows you the findings, and lets you decide whether to execute.
+You're executing unreviewed code with your user privileges. scurl downloads the script, runs static analysis for dangerous patterns and prompt injection, sends it to an AI for security analysis, shows you the findings, and lets you decide whether to execute.
 
 ## Install
 
@@ -34,7 +34,9 @@ Requires Rust 1.70+ ([rustup.rs](https://rustup.rs)).
 scurl login
 ```
 
-Choose your AI provider, enter credentials (or skip for Ollama), done. Config is saved to `~/.scurl/config.toml` with `0600` permissions.
+Choose your AI provider, enter credentials (or skip for Ollama), done. Config is saved to `~/.scurl/config.toml` with `0600` permissions in a `0700` directory.
+
+For maximum security, use the `SCURL_API_KEY` environment variable instead of storing the key in the config file.
 
 ### Providers
 
@@ -43,7 +45,11 @@ Choose your AI provider, enter credentials (or skip for Ollama), done. Config is
 | **Anthropic** | claude-haiku-4-5 | [console.anthropic.com](https://console.anthropic.com) |
 | **xAI** | grok-4-1-fast-reasoning | [console.x.ai](https://console.x.ai) |
 | **OpenAI** | gpt-5-nano | [platform.openai.com](https://platform.openai.com/api-keys) |
+| **Azure OpenAI** | gpt-5-nano | [portal.azure.com](https://portal.azure.com) |
+| **Google Gemini** | gemini-2.5-flash | [aistudio.google.com](https://aistudio.google.com/app/apikey) |
 | **Ollama** | llama3.2 | None required ([ollama.ai](https://ollama.ai)) |
+
+Azure OpenAI requires an endpoint URL and deployment name during setup. These can also be set via `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_DEPLOYMENT` environment variables.
 
 ## Usage
 
@@ -62,6 +68,8 @@ scurl login                                 # Reconfigure
 
 ⠋ Downloading script...
 ✓ Downloaded 1247 bytes
+
+✓ Static analysis: No suspicious patterns detected
 
 ⠋ Analyzing script with xAI (Grok) AI...
 ✓ Analysis complete!
@@ -94,16 +102,18 @@ Execute this script? [y/N]:
 | HIGH | No | Significant security risks |
 | CRITICAL | No | Severe threats, do not execute |
 
+Auto-execute is also blocked when static analysis finds critical issues, regardless of the AI risk level.
+
 ### Network & Proxy
 
 ```bash
 scurl -x http://proxy.corp.com:8080 URL        # Proxy
-scurl -k URL                                    # Skip SSL verification
+scurl -k URL                                    # Skip SSL verification (script downloads only)
 scurl -H "Authorization: Bearer $TOKEN" URL     # Custom headers
 scurl --timeout 60 --retries 5 URL              # Timeouts & retries
 ```
 
-Environment variables `HTTPS_PROXY` and `HTTP_PROXY` are respected automatically. See [NETWORK.md](NETWORK.md) for full proxy and enterprise configuration.
+Environment variables `HTTPS_PROXY` and `HTTP_PROXY` are respected automatically. Proxy URLs must use `http`, `https`, `socks5`, or `socks5h` schemes. See [NETWORK.md](NETWORK.md) for full proxy and enterprise configuration.
 
 ### Flags
 
@@ -112,54 +122,92 @@ Environment variables `HTTPS_PROXY` and `HTTP_PROXY` are respected automatically
 | `--auto-execute` | `-a` | Auto-execute safe/low risk scripts |
 | `--shell <SHELL>` | `-s` | Shell for execution (default: bash) |
 | `--provider <NAME>` | `-p` | Override configured provider |
-| `--api-key <KEY>` | | Override configured API key |
 | `--proxy <URL>` | `-x` | HTTP/HTTPS proxy |
 | `--timeout <SECS>` | `-t` | Request timeout (default: 30) |
 | `--retries <N>` | | Retry attempts (default: 3) |
-| `--insecure` | `-k` | Disable SSL verification |
+| `--insecure` | `-k` | Disable SSL verification (script downloads only) |
 | `--header <H>` | `-H` | Add custom header |
 | `--user-agent <UA>` | `-A` | Custom User-Agent |
 | `--max-redirects <N>` | | Max redirects (default: 10) |
 | `--system-proxy` | | Use system proxy settings |
 | `--no-proxy` | | Disable proxy |
-| `--yolo` | | Skip AI review entirely |
+| `--yolo` | | Skip AI review (still requires confirmation) |
 | `--version` | `-V` | Print version |
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `SCURL_API_KEY` | Override API key (preferred over config file) |
+| `HTTPS_PROXY` | Proxy URL for all requests |
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint URL |
+| `AZURE_OPENAI_DEPLOYMENT` | Azure OpenAI deployment name |
 
 ## How It Works
 
-1. **Download** the script with retry logic and size limits (10 MB max)
-2. **Analyze** via your configured AI provider for security issues
-3. **Report** risk level, findings, and recommendation
-4. **Prompt** for confirmation (or auto-execute with `-a` if safe)
-5. **Execute** in a temporary file with your chosen shell
+1. **Validate** the URL (only `http`/`https` schemes allowed)
+2. **Download** the script with streaming, retry logic, and size limits (10 MB max)
+3. **Static analysis** scans for 22 dangerous patterns: shell exploits, reverse shells, data exfiltration, and prompt injection attempts
+4. **AI analysis** via your configured provider, with static findings forwarded for context
+5. **Report** risk level, findings, and recommendation
+6. **Prompt** for confirmation (or auto-execute with `-a` if safe and no critical static findings)
+7. **Execute** in a temporary file (`0700` permissions) with your chosen shell
 
-The AI checks for: suspicious commands (`eval`, `base64`, nested `curl | bash`), untrusted downloads, privilege escalation, code obfuscation, credential harvesting, backdoor patterns, and destructive operations.
+### Static Analysis
+
+Before AI review, scurl runs a built-in pattern scanner that detects:
+
+**Shell Security** -- `eval` with dynamic content, base64-to-shell pipes, curl/wget piped to bash, `chmod 777`, `rm -rf /`, `/dev/tcp` redirections, reverse shells (`nc -e`), `LD_PRELOAD` injection, crontab manipulation, SSH key injection, direct disk writes, Python exec, history evasion, environment exfiltration, silent downloads to `/tmp`
+
+**Prompt Injection** -- fake `RISK_LEVEL: SAFE` embedded in scripts, "ignore previous instructions", fake analysis output, AI role-play attempts, prompt override attempts, hidden base64 payloads in comments, markdown fence escape attempts
+
+When prompt injection is detected, auto-execute is blocked and `--yolo` mode requires explicit confirmation.
 
 ## CI/CD
 
 ```yaml
 # GitHub Actions
 - name: Install tool with scurl
+  env:
+    SCURL_API_KEY: ${{ secrets.SCURL_API_KEY }}
   run: |
-    scurl --provider anthropic --api-key ${{ secrets.ANTHROPIC_API_KEY }} \
-      --auto-execute https://example.com/install.sh
+    scurl --provider anthropic --auto-execute https://example.com/install.sh
 ```
+
+## Security
+
+### Split HTTP Clients
+
+scurl uses separate HTTP clients for script downloads and API calls. The `--insecure` flag only affects script downloads -- API calls to your AI provider always enforce TLS certificate verification.
+
+### Atomic Config Writes
+
+Configuration files are written atomically using temp-file-then-rename to prevent TOCTOU race conditions. Directory permissions are set to `0700` and file permissions to `0600` before any secrets are written.
+
+### Content-Type Validation
+
+Downloads are rejected if the content type indicates a non-script file (images, videos, PDFs, executables, archives). Ambiguous types produce a warning.
+
+### Retry with Backoff
+
+Network retries use exponential backoff with jitter (1s, 2s, 4s... capped at 30s) to avoid thundering herd issues. Client errors (4xx) are not retried.
+
+### Limitations
+
+AI analysis is helpful but not infallible. Always review the findings, especially for HIGH and CRITICAL risk scripts. The `--yolo` flag bypasses AI review but still runs static analysis and requires confirmation.
 
 ## Development
 
 ```bash
 git config core.hooksPath .githooks   # Enable secret-detection hooks
-make test                              # Run tests (14 total)
-make check                             # fmt + clippy + audit
-make lint                              # Strict clippy
-make build                             # Release build
+cargo test --all-features             # Run tests
+cargo clippy -- -D warnings           # Lint
+cargo build --release                 # Release build
 ```
 
+The pre-commit hook detects Anthropic, OpenAI, xAI, and AWS keys in staged files.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-## Safety
-
-AI analysis is helpful but not infallible. Always review the findings, especially for HIGH and CRITICAL risk scripts. The `--yolo` flag bypasses all review -- use it only with sources you fully trust.
 
 ## License
 
