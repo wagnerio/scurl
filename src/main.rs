@@ -879,11 +879,11 @@ async fn login_command(cli: &Cli) -> Result<()> {
     // Select provider
     println!("{}", "Available providers:".bold());
     println!(
-        "  1. {} (Claude Sonnet 4.5, Haiku, Opus)",
+        "  1. {} (Claude Haiku 4.5, Sonnet, Opus)",
         "Anthropic".cyan()
     );
     println!("  2. {} (Grok 4)", "xAI".cyan());
-    println!("  3. {} (GPT-4, gpt-5-nano)", "OpenAI".cyan());
+    println!("  3. {} (GPT-5)", "OpenAI".cyan());
     println!("  4. {} (Local models via Ollama)", "Ollama".cyan());
 
     let choice = prompt("\nSelect provider [1-4]: ")?;
