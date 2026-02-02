@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.1] - 2026-02-02
+
+### Added
+- **gVisor (runsc) runtime isolation** — new `--runtime-isolation` flag with `auto|bubblewrap|podman|podman-gvisor` backends for selecting the script execution sandbox
+- **runsc auto-detection** — probes `SCURL_RUNSC_PATH` env var, `/usr/local/bin/runsc`, and `/usr/bin/runsc`
+- **Rootless Podman + gVisor warning** — alerts users to known cgroup/network namespace issues with rootless mode (google/gvisor#311)
+- **`runtime_used` audit field** — container results and audit log entries now record which runtime was used (`podman-gvisor` or `podman`)
+
+### Changed
+- Podman arg construction refactored into `configure_podman_run()` helper, eliminating duplication between monitored and unmonitored execution paths
+- Explicit `--runtime-isolation=podman` or `podman-gvisor` overrides the risk-level gate (container runs even for HIGH risk scripts)
+- `--runtime-container` flag marked deprecated in help text (still functional, now opportunistically tries gVisor when available)
+
 ## [0.5.0] - 2026-02-01
 
 ### Added
